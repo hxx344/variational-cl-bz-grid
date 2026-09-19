@@ -2,6 +2,16 @@
 # Debian 12+ / Ubuntu 24.04+, systemd. All orders are simulated.
 set -euo pipefail
 umask 077
+requested_mode=
+if [[ $# -gt 1 ]]; then
+  echo 'Usage: install.sh [--compare|--single]' >&2; exit 1
+fi
+case ${1:-} in
+  --compare) requested_mode=compare ;;
+  --single) requested_mode=run ;;
+  '') ;;
+  *) echo 'Usage: install.sh [--compare|--single]' >&2; exit 1 ;;
+esac
 
 if [[ ${EUID} -ne 0 ]]; then
   echo 'Run with sudo bash (root is needed to install the service).' >&2
@@ -26,6 +36,8 @@ conf=/etc/variational-grid
 state=/var/lib/variational-grid
 repository=https://github.com/hxx344/variational-cl-bz-grid.git
 account=variational-grid
+mode=${requested_mode:-$(cat "$conf/mode" 2>/dev/null || echo run)}
+[[ $mode == run || $mode == compare ]] || { echo 'Invalid saved service mode.' >&2; exit 1; }
 
 id "$account" >/dev/null 2>&1 || useradd --system --home-dir "$state" --shell /usr/sbin/nologin "$account"
 install -d -m 755 "$app" "$app/releases" "$conf"
@@ -56,11 +68,31 @@ Path(sys.argv[2]).write_text(json.dumps(data, indent=2) + '\n')
 PY
   chmod 644 "$conf/config.json"
 fi
+if [[ $mode == compare && ! -f "$conf/experiments.json" ]]; then
+  python3 - "$release/experiments.example.json" "$conf/experiments.json" <<'PY'
+import json, sys
+from pathlib import Path
+data = json.loads(Path(sys.argv[1]).read_text())
+data['base_config'] = '/etc/variational-grid/config.json'
+data['output_dir'] = '/var/lib/variational-grid/comparison-015-020-025'
+Path(sys.argv[2]).write_text(json.dumps(data, indent=2) + '\n')
+PY
+  chmod 644 "$conf/experiments.json"
+fi
 # Validate preserved config before switching the running version.
-(cd "$release" && python3 - <<'PY'
+(cd "$release" && python3 - "$mode" <<'PY'
+import sys
 from pathlib import Path
 from variational_grid.cli import configuration
+from variational_grid.comparison import Experiment
 config = configuration('/etc/variational-grid/config.json')
+if sys.argv[1] == 'compare':
+    experiment = Experiment.load('/etc/variational-grid/experiments.json')
+    if experiment.base != config:
+        raise SystemExit('Service experiments must use /etc/variational-grid/config.json')
+    output = experiment.output
+    if output == Path('/var/lib/variational-grid') or not output.is_relative_to('/var/lib/variational-grid'):
+        raise SystemExit('Service experiment output must stay inside /var/lib/variational-grid')
 root = Path('/var/lib/variational-grid').resolve()
 for value in (config.session_file, config.state_file):
     path = Path(value).resolve()
@@ -101,6 +133,11 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 [Install]
 WantedBy=multi-user.target
 UNIT
+if [[ $mode == compare ]]; then
+  sed -i 's|^ExecStart=.*|ExecStart=/usr/bin/python3 -m variational_grid compare --experiments /etc/variational-grid/experiments.json|' /etc/systemd/system/variational-grid.service
+fi
+printf '%s\n' "$mode" >"$conf/mode"
+chmod 644 "$conf/mode"
 systemctl daemon-reload
 systemctl enable variational-grid.service
 systemctl restart variational-grid.service

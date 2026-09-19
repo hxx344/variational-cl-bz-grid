@@ -35,6 +35,37 @@ python -m unittest discover -s tests -v
 
 演示使用合成行情，仅验证正反向网格行为，**不是历史回测或收益预测**。再次演示须指定新的 `--state-file data/demo2.sqlite3`，已有数据不会被覆盖。
 
+## 三种间距同时模拟
+
+默认对照 **0.15、0.20、0.25 USDC/桶**，配置见 [experiments.example.json](experiments.example.json)。三组共同读取 `config.local.json`；除间距外参数相同，默认各有 1000 USDC 模拟资金、每格每腿 1 桶、最多 8 组持仓。
+
+间距是 **BZ−CL 价差的绝对变化，不是百分比**。例如中枢为 3.50、间距 0.20 时，做空价差的层级是 3.70、3.90、4.10……，做多价差的层级是 3.30、3.10、2.90……。当前实现还把间距用作每桶净止盈目标：每腿 1 桶的一组仓位，扣除买卖点差、滑点和手续费后利润达到 0.20 USDC 才止盈。三组对照会同时改变入场间距与净止盈目标。
+
+导入会话后，启动三组只需：
+
+```powershell
+python -m variational_grid compare
+```
+
+同一份 CL/BZ 报价先整体校验，再交给三组独立账本；不会为每组重复请求同数量报价。任一行情无效时所有组一起暂停，避免采样时间不同造成偏差。
+
+```powershell
+python -m variational_grid compare-status
+python -m variational_grid compare-stop
+```
+
+在另一个终端执行 `compare-stop`，将在当前行情请求结束后停止，保留模拟持仓。也可以用 Ctrl+C；再次执行 `compare` 从原状态继续，不补造停机期间的成交。电脑关机或进程退出后不会继续采样。
+
+对照页面是 `data/comparison-015-020-025/public/index.html`，浏览器打开即可；每 10 秒刷新，显示共同采样时间、过期状态、总盈亏、已实现盈亏、累计最大回撤、已开/已平组数、保证金及曲线。也可仅将该 `public` 子目录作为本机只读页面服务：
+
+```powershell
+python -m http.server 0 --bind 127.0.0.1 --directory data/comparison-015-020-025/public
+```
+
+端口 `0` 会自动选择空闲端口，访问终端显示的 `http://127.0.0.1:端口/` 地址即可。`public/summary.json` 提供相同结果，均不包含令牌。页面使用自带 SVG、无外部资源，桌面与手机分别布局；三组曲线共用纵轴，断网缺口不会画成连续行情。页面只展示最近 360 次采样，累计统计不受这个展示窗口影响；没有根据短期结果自动挑选“最佳参数”。
+
+共同行情、各组账本和汇总存放于同一个实验目录，完整保留共同采样记录。意外中断后重放已记录但尚未完成处理的共同行情，不会重复记账。备份时先停止进程，再整体复制实验目录；不可单独替换某一组账本。更改间距、资金、数量或组别时，在实验文件里指定新的 `output_dir`，不要混入原实验。可通过 `--experiments <文件路径>` 使用其他实验配置。
+
 ## 策略口径
 
 `S = mark(BZ) − mark(CL)`，单位 USDC/桶。中枢 `C` 是最近 **168 根已收盘 UTC 小时 K 线**的 `close(BZ) − close(CL)` 算术平均，每小时更新一次。两腿时间戳必须完整、一一对齐；不使用尚未收盘 K 线、不补齐缺口。
@@ -94,6 +125,14 @@ curl -fsSL https://raw.githubusercontent.com/hxx344/variational-cl-bz-grid/main/
 ```
 
 自动安装 Python 与 Git、下载代码、运行测试、创建独立服务账户和 systemd 服务并启动模拟。首次安装提示隐藏输入 `vr-token`。重复执行同一命令升级，保留配置、会话与账本；旧代码版本保留在 releases 中。
+
+直接部署本次三组对照，或将已有服务切换为对照模式：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/hxx344/variational-cl-bz-grid/main/install.sh | sudo bash -s -- --compare
+```
+
+实验配置放在 `/etc/variational-grid/experiments.json`，结果放在 `/var/lib/variational-grid/comparison-015-020-025/`。重复升级保留所选模式和已有实验配置；用 `--single` 切回原单组模式，各自账本保留。对照服务可以用下方 `systemctl stop` 停止；仅部署模拟进程，不自动暴露网页端口。
 
 - 参数：`/etc/variational-grid/config.json`
 - 会话、账本：`/var/lib/variational-grid/`；可改文件名，但服务配置要求路径保持在该目录内。

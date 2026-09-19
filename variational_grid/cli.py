@@ -190,6 +190,14 @@ def main(argv=None):
     sub = commands.add_parser("demo")
     sub.add_argument("--state-file", default="data/demo.sqlite3")
     sub.set_defaults(function=demo)
+    from .comparison import run_comparison, comparison_status, stop_comparison
+    for name, function in (("compare", run_comparison), ("compare-status", comparison_status), ("compare-stop", stop_comparison)):
+        sub = commands.add_parser(name)
+        sub.add_argument("--experiments", default="experiments.example.json")
+        sub.set_defaults(function=function)
+        if name == "compare":
+            sub.add_argument("--once", action="store_true")
+            sub.add_argument("--iterations", type=int, default=0)
     args = parser.parse_args(argv)
     if getattr(args, "iterations", 0) < 0:
         parser.error("iterations must be non-negative")
