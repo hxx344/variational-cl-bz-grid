@@ -1,0 +1,14 @@
+__pycache__/
+*.py[cod]
+.venv/
+.env
+.env.*
+data/
+output/
+config.local.json
+session*.json
+*.sqlite*
+*.log
+*.patch
+*.curl
+variational-me.txt
