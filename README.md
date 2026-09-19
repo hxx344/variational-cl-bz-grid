@@ -64,10 +64,10 @@ python -m variational_grid compare-stop
 保持模拟进程运行，在另一个终端启动页面：
 
 ```powershell
-python -m variational_grid dashboard --port 8765
+python -m variational_grid dashboard --port 9876
 ```
 
-打开 [本机监控页](http://127.0.0.1:8765/)。端口被占用时可以用 `--port 0` 自动选择空闲端口，访问终端输出的地址。使用自定义实验文件时，监控命令也加上对应的 `--experiments <文件路径>`。
+打开 [本机监控页](http://127.0.0.1:9876/)。端口被占用时可以用 `--port 0` 自动选择空闲端口，访问终端输出的地址。使用自定义实验文件时，监控命令也加上对应的 `--experiments <文件路径>`。
 
 - **策略对照**：0.15、0.20、0.25 各自的累计损益、已实现损益、浮盈亏、最大回撤、持仓组数；独立账户不相加。
 - **两张图表**：同轴比较三组累计损益，以及 BZ−CL 价差与七日中枢。支持 1 小时、24 小时、7 天，点击图表或使用键盘采样滑块查看历史点。
@@ -156,13 +156,13 @@ sudo bash install.sh --compare
 
 首次安装不带参数也默认运行三组；已有安装不带参数会保留所选模式，`--compare` 明确切换为三组。实验配置放在 `/etc/variational-grid/experiments.json`，结果放在 `/var/lib/variational-grid/comparison-015-020-025/`。已有实验配置不会被覆盖；用 `--single` 切回原单组模式，各自账本保留，同时停用三组网页服务。
 
-比较模式自动安装并启动 `variational-grid-web.service`，只监听服务器 `127.0.0.1:8765`。在**自己的电脑**打开 PowerShell 或终端，替换服务器登录名和 IP 后执行：
+比较模式自动安装并启动 `variational-grid-web.service`，只监听服务器 `127.0.0.1:9876`。在**自己的电脑**打开 PowerShell 或终端，替换服务器登录名和 IP 后执行：
 
 ```powershell
-ssh -N -o ExitOnForwardFailure=yes -L 18765:127.0.0.1:8765 root@你的服务器IP
+ssh -N -o ExitOnForwardFailure=yes -L 18765:127.0.0.1:9876 root@你的服务器IP
 ```
 
-保持此终端打开，浏览器访问 [服务器监控页（SSH 转发）](http://127.0.0.1:18765/)。不需要域名，也不需要开放 8765 公网端口。升级已有服务器仍然只需重复上方一键命令，旧账本会直接出现在页面中。网页本身不要求粘贴令牌。
+保持此终端打开，浏览器访问 [服务器监控页（SSH 转发）](http://127.0.0.1:18765/)。不需要域名，也不需要开放 9876 公网端口。升级已有服务器仍然只需重复上方一键命令，旧账本会直接出现在页面中。网页本身不要求粘贴令牌。
 
 - 参数：`/etc/variational-grid/config.json`
 - 会话、账本：`/var/lib/variational-grid/`；可改文件名，但服务配置要求路径保持在该目录内。

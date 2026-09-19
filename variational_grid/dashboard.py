@@ -123,7 +123,7 @@ def read_dashboard(experiment, window="24h"):
     return result
 
 
-def make_server(experiment, port=8765):
+def make_server(experiment, port=9876):
     assets = Path(__file__).with_name("web")
 
     class Handler(BaseHTTPRequestHandler):

@@ -107,7 +107,7 @@ if name == "runuser":
         self.assertEqual((self.conf / "mode").read_text().strip(), "compare")
         self.assertIn("compare --experiments", self.unit.read_text())
         self.assertIn("dashboard --experiments", self.web_unit.read_text())
-        self.assertIn("--port 8765", self.web_unit.read_text())
+        self.assertIn("--port 9876", self.web_unit.read_text())
         calls = [json.loads(line) for line in self.log.read_text().splitlines()]
         self.assertIn(["systemctl", "enable", "variational-grid-web.service"], calls)
         self.assertIn(["systemctl", "restart", "variational-grid-web.service"], calls)

@@ -8,7 +8,7 @@ usage() {
 Usage: install.sh [--compare|--single|--help]
 Debian 12+ / Ubuntu 24.04+, with systemd and Python 3.11+.
 New installs run the 0.15 / 0.20 / 0.25 paper comparison by default.
-The comparison includes a localhost dashboard on port 8765, accessed over SSH.
+The comparison includes a localhost dashboard on port 9876, accessed over SSH.
 Repeating the command upgrades code and preserves mode, settings and data.
   --compare  Start the three-grid comparison (also switches existing installs).
   --single   Start one grid using config.json.
@@ -172,7 +172,7 @@ Type=simple
 User=variational-grid
 Group=variational-grid
 WorkingDirectory=/opt/variational-grid/current
-ExecStart=/usr/bin/python3 -m variational_grid dashboard --experiments /etc/variational-grid/experiments.json --port 8765
+ExecStart=/usr/bin/python3 -m variational_grid dashboard --experiments /etc/variational-grid/experiments.json --port 9876
 Restart=on-failure
 RestartSec=10
 UMask=0077
@@ -210,7 +210,7 @@ if [[ $mode == compare ]]; then
   echo 'Experiments: /etc/variational-grid/experiments.json'
   echo 'Report: <output_dir from experiments.json>/public/index.html'
   echo 'Dashboard: run this on your own computer (keep the terminal open):'
-  echo '  ssh -N -o ExitOnForwardFailure=yes -L 18765:127.0.0.1:8765 USER@SERVER_IP'
+  echo '  ssh -N -o ExitOnForwardFailure=yes -L 18765:127.0.0.1:9876 USER@SERVER_IP'
   echo 'Then open http://127.0.0.1:18765/ in your browser. No public web port is required.'
   echo 'Dashboard logs: journalctl -u variational-grid-web -f'
 fi
