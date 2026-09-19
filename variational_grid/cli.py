@@ -203,6 +203,11 @@ def main(argv=None):
         if name == "compare":
             sub.add_argument("--once", action="store_true")
             sub.add_argument("--iterations", type=int, default=0)
+    from .dashboard import serve_dashboard
+    sub = commands.add_parser("dashboard", help="Read-only web monitor through a localhost SSH tunnel")
+    sub.add_argument("--experiments", default="experiments.example.json")
+    sub.add_argument("--port", type=int, default=8765)
+    sub.set_defaults(function=serve_dashboard)
     args = parser.parse_args(argv)
     if getattr(args, "iterations", 0) < 0:
         parser.error("iterations must be non-negative")

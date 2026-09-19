@@ -14,3 +14,6 @@ variational-grid = "variational_grid.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["variational_grid*"]
+
+[tool.setuptools.package-data]
+variational_grid = ["web/*.html", "web/*.js", "web/*.css"]

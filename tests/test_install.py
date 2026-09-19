@@ -38,6 +38,7 @@ class InstallTests(unittest.TestCase):
         units = self.root / "etc/systemd/system"
         units.mkdir(parents=True)
         self.unit = units / "variational-grid.service"
+        self.web_unit = units / "variational-grid-web.service"
         installer = (self.project / "install.sh").read_text()
         for original, replacement in (
             ("/opt/variational-grid", self.app),
@@ -105,6 +106,11 @@ if name == "runuser":
         self.install()
         self.assertEqual((self.conf / "mode").read_text().strip(), "compare")
         self.assertIn("compare --experiments", self.unit.read_text())
+        self.assertIn("dashboard --experiments", self.web_unit.read_text())
+        self.assertIn("--port 8765", self.web_unit.read_text())
+        calls = [json.loads(line) for line in self.log.read_text().splitlines()]
+        self.assertIn(["systemctl", "enable", "variational-grid-web.service"], calls)
+        self.assertIn(["systemctl", "restart", "variational-grid-web.service"], calls)
         self.assertEqual((self.app / "current").resolve().name, self.revision)
         experiments = json.loads((self.conf / "experiments.json").read_text())
         self.assertEqual([s["overrides"]["grid_step_usdc_per_barrel"] for s in experiments["scenarios"]], ["0.15", "0.20", "0.25"])
@@ -129,6 +135,8 @@ if name == "runuser":
             self.assertEqual(path.read_bytes(), content)
         self.assertEqual((self.state / "session.json").stat().st_mode & 0o777, 0o600)
         self.install("--single")
+        calls = [json.loads(line) for line in self.log.read_text().splitlines()]
+        self.assertIn(["systemctl", "disable", "--now", "variational-grid-web.service"], calls)
         self.install()
         self.assertEqual((self.conf / "mode").read_text().strip(), "run")
         self.assertIn(" run --config ", self.unit.read_text())

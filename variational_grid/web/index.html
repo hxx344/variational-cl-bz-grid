@@ -1,0 +1,32 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light"><title>CL / BZ 原油价差监控</title>
+  <link rel="stylesheet" href="/styles.css"><script defer src="/model.js"></script><script defer src="/app.js"></script>
+</head>
+<body>
+<a class="skip" href="#main">跳到监控内容</a>
+<aside class="sidebar">
+  <a class="brand" href="/" aria-label="原油价差监控首页"><svg viewBox="0 0 32 32" aria-hidden="true"><path d="M4 9h19l-5-5M28 23H9l5 5" fill="none" stroke="currentColor" stroke-width="3"/><path d="M7 15v12M25 5v12" stroke="currentColor" stroke-width="3"/></svg><span>CL / BZ<small>价差实验室</small></span></a>
+  <nav aria-label="页面导航"><a href="#overview" class="nav-link active">策略总览</a><a href="#details" data-view="positions" class="nav-link">当前仓位</a><a href="#details" data-view="trades" class="nav-link">损益记录</a><a href="#method" class="nav-link">模拟口径</a></nav>
+  <div class="sidebar-foot"><span class="paper-label">模拟交易</span><p>三种间距<br>同一段市场行情</p><small>等桶数配对<br>七日滚动中枢</small></div>
+</aside>
+<main id="main">
+  <header class="topbar"><div><span class="breadcrumb">Variational Omni / 策略监控</span><h1>原油价差网格</h1></div><div class="top-actions"><span class="status" id="status" role="status">连接中</span><button id="refresh" class="button outline">刷新数据</button></div></header>
+  <div id="notice" class="notice" role="status" hidden></div>
+  <section id="overview" aria-label="策略总览">
+    <div class="section-title"><div><h2>三组策略，同场对照</h2><p id="experiment-info">等待第一份有效行情</p></div><button id="all-strategies" class="text-button">查看全部策略</button></div>
+    <div id="strategies" class="strategy-grid"><div class="empty initial">正在读取模拟账本…</div></div>
+  </section>
+  <section class="charts-layout" aria-label="盈亏与价差曲线">
+    <article class="panel pnl-panel"><div class="panel-head"><div><h2>累计损益</h2><p>包含持仓浮盈亏 <span class="unit">USDC</span></p></div><div class="segmented" role="group" aria-label="曲线时间范围"><button data-range="1h">1 小时</button><button data-range="24h" aria-pressed="true">24 小时</button><button data-range="7d">7 天</button></div></div><div id="pnl-legend" class="legend"></div><div id="pnl-chart" class="chart" aria-label="三组策略累计损益折线图"></div><div class="inspect"><label for="sample">查看采样点</label><input id="sample" type="range" min="0" max="0" value="0" aria-label="选择历史采样点"><output id="sample-time">—</output></div><div id="sample-values" class="sample-values"></div><p id="history-note" class="chart-note"></p></article>
+    <article class="panel spread-panel"><div class="panel-head"><div><h2>价差与中枢</h2><p>BZ − CL <span class="unit">USDC / 桶</span></p></div><span id="deviation" class="deviation">—</span></div><div class="market-values"><div><span>当前价差</span><strong id="spread-value">—</strong></div><div><span>七日中枢</span><strong id="center-value">—</strong></div></div><div class="legend"><span><i class="key spread-key"></i>价差</span><span><i class="key center-key"></i>七日中枢</span></div><div id="spread-chart" class="chart" aria-label="BZ减CL价差和七日中枢折线图"></div><div class="underlying"><span>CL <b id="cl-mark">—</b></span><span>BZ <b id="bz-mark">—</b></span></div></article>
+  </section>
+  <section class="panel occupancy"><div class="panel-head"><div><h2>网格占用</h2><p>每一个格位，对应一组 CL + BZ 配对仓位</p></div><span class="small-muted">实心为持仓，空心为空闲</span></div><div id="grid-map" class="grid-map"></div></section>
+  <section id="details" class="panel detail-panel"><div class="detail-toolbar"><div class="tabs" role="tablist" aria-label="策略详情"><button role="tab" data-view="positions" aria-selected="true" aria-controls="detail-content">当前仓位 <span id="positions-count">0</span></button><button role="tab" data-view="trades" aria-selected="false" aria-controls="detail-content">已平仓记录 <span id="trades-count">0</span></button><button role="tab" data-view="parameters" aria-selected="false" aria-controls="detail-content">参数对照</button></div><div class="detail-actions"><label for="strategy-select" class="sr-only">筛选策略</label><select id="strategy-select"><option value="all">全部策略</option></select><button id="export" class="button outline" hidden>导出筛选结果</button></div></div><div id="detail-content" role="tabpanel"></div><div id="pagination" class="pagination" hidden><span id="page-label"></span><div><button id="previous" class="button outline">上一页</button><button id="next" class="button outline">下一页</button></div></div><p id="detail-note" class="detail-note"></p></section>
+  <details id="method" class="method"><summary>数据与模拟口径</summary><div><p>中枢取最近 168 根对齐、已收盘 UTC 小时 K 线的 BZ−CL 平均值，每小时更新。每组按等桶数配对；间距同时作为每桶净止盈目标。</p><p>买入使用 ask、卖出使用 bid，并计配置中的滑点和开平仓手续费。持仓浮盈亏按同一份有效报价的预计退出价计算；与已实现损益相加得到总损益。</p><p>尚未计实际资金费和强平机制，指示性报价不保证真实成交。网格图显示已持仓层级，滚动中枢不会改写原持仓成本。</p><p id="source-window"></p><a href="/report">打开无脚本简表</a></div></details>
+  <footer><span>只读模拟监控 · 页面时间为北京时间</span><span id="freshness">等待行情</span></footer>
+  <noscript><p class="notice">此监控页需要 JavaScript。你也可以<a href="/report">查看无脚本简表</a>。</p></noscript>
+</main>
+</body></html>

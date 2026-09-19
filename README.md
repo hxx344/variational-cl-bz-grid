@@ -8,7 +8,7 @@
 
 ## 直接运行
 
-需要 Python 3.11+，运行和测试均使用标准库，无第三方运行依赖。在项目目录中执行：
+需要 Python 3.11+，运行使用标准库，无第三方运行依赖。前端逻辑测试另用 Node.js，部署运行无需 Node.js。在项目目录中执行：
 
 ```powershell
 python -m variational_grid init-session --curl-file "C:/path/to/variational-me.txt"
@@ -59,13 +59,32 @@ python -m variational_grid compare-stop
 
 在另一个终端执行 `compare-stop`，将在当前行情请求结束后停止，保留模拟持仓。也可以用 Ctrl+C；再次执行 `compare` 从原状态继续，不补造停机期间的成交。电脑关机或进程退出后不会继续采样。
 
-对照页面是 `data/comparison-015-020-025/public/index.html`，浏览器打开即可；每 10 秒刷新，显示共同采样时间、过期状态、总盈亏、已实现盈亏、累计最大回撤、已开/已平组数、保证金及曲线。也可仅将该 `public` 子目录作为本机只读页面服务：
+### 可视化监控
+
+保持模拟进程运行，在另一个终端启动页面：
+
+```powershell
+python -m variational_grid dashboard --port 8765
+```
+
+打开 [本机监控页](http://127.0.0.1:8765/)。端口被占用时可以用 `--port 0` 自动选择空闲端口，访问终端输出的地址。使用自定义实验文件时，监控命令也加上对应的 `--experiments <文件路径>`。
+
+- **策略对照**：0.15、0.20、0.25 各自的累计损益、已实现损益、浮盈亏、最大回撤、持仓组数；独立账户不相加。
+- **两张图表**：同轴比较三组累计损益，以及 BZ−CL 价差与七日中枢。支持 1 小时、24 小时、7 天，点击图表或使用键盘采样滑块查看历史点。
+- **网格与仓位**：实心格代表已有持仓，点击策略或格位筛选；列出各层 CL/BZ 方向、桶数、开仓价、开仓时间、保证金估算及浮盈亏。
+- **平仓记录**：查看双腿开平价格、净损益、退出原因；可导出当前筛选结果 CSV。每策略加载最近 100 笔并分页展示，页面会标明导出条数；不是全历史导出。
+
+页面每 10 秒更新，隐藏标签页停止轮询；暂停、过期和断线均保留上次数据并明确标注。显示北京时间，金额为 USDC、价格为 USDC/桶。时间范围以最后有效行情结束，最多绘制 900 点，降密保留区间高低点和时间缺口，累计指标不受图表窗口影响。策略、时间范围和标签页保存在 URL 中，刷新后保留。手机布局保留三组摘要、图表和按行展开的仓位。
+
+网页进程只读本地已发布的共同采样和各组账本，不读取登录令牌、不请求交易所、不提供下单或修改配置入口。仓位按共同采样时间截断，浮盈亏按该时刻的数量对应报价和成本估值。模拟报价仍由原进程获取，网页不需要另输入令牌。
+
+原来的静态简表仍保存为 `data/comparison-015-020-025/public/index.html`，也可以从新页面的“数据与模拟口径”打开。仅查看静态简表可执行：
 
 ```powershell
 python -m http.server 0 --bind 127.0.0.1 --directory data/comparison-015-020-025/public
 ```
 
-端口 `0` 会自动选择空闲端口，访问终端显示的 `http://127.0.0.1:端口/` 地址即可。`public/summary.json` 提供相同结果，均不包含令牌。页面使用自带 SVG、无外部资源，桌面与手机分别布局；三组曲线共用纵轴，断网缺口不会画成连续行情。页面只展示最近 360 次采样，累计统计不受这个展示窗口影响；没有根据短期结果自动挑选“最佳参数”。
+端口 `0` 会自动选择空闲端口，访问终端显示的地址即可。`public/summary.json` 提供相同结果，均不包含令牌。静态简表只展示最近 360 次采样；新监控页支持上述更长时间范围。两种页面都使用自带 SVG、无外部资源，没有根据短期结果自动挑选“最佳参数”。
 
 共同行情、各组账本和汇总存放于同一个实验目录，完整保留共同采样记录。意外中断后重放已记录但尚未完成处理的共同行情，不会重复记账。备份时先停止进程，再整体复制实验目录；不可单独替换某一组账本。更改间距、资金、数量或组别时，在实验文件里指定新的 `output_dir`，不要混入原实验。可通过 `--experiments <文件路径>` 使用其他实验配置。
 
@@ -135,11 +154,20 @@ curl -fsSL https://raw.githubusercontent.com/hxx344/variational-cl-bz-grid/main/
 sudo bash install.sh --compare
 ```
 
-首次安装不带参数也默认运行三组；已有安装不带参数会保留所选模式，`--compare` 明确切换为三组。实验配置放在 `/etc/variational-grid/experiments.json`，结果放在 `/var/lib/variational-grid/comparison-015-020-025/`。已有实验配置不会被覆盖；用 `--single` 切回原单组模式，各自账本保留。仅部署模拟进程，不自动开放公网网页端口。
+首次安装不带参数也默认运行三组；已有安装不带参数会保留所选模式，`--compare` 明确切换为三组。实验配置放在 `/etc/variational-grid/experiments.json`，结果放在 `/var/lib/variational-grid/comparison-015-020-025/`。已有实验配置不会被覆盖；用 `--single` 切回原单组模式，各自账本保留，同时停用三组网页服务。
+
+比较模式自动安装并启动 `variational-grid-web.service`，只监听服务器 `127.0.0.1:8765`。在**自己的电脑**打开 PowerShell 或终端，替换服务器登录名和 IP 后执行：
+
+```powershell
+ssh -N -o ExitOnForwardFailure=yes -L 18765:127.0.0.1:8765 root@你的服务器IP
+```
+
+保持此终端打开，浏览器访问 [服务器监控页（SSH 转发）](http://127.0.0.1:18765/)。不需要域名，也不需要开放 8765 公网端口。升级已有服务器仍然只需重复上方一键命令，旧账本会直接出现在页面中。网页本身不要求粘贴令牌。
 
 - 参数：`/etc/variational-grid/config.json`
 - 会话、账本：`/var/lib/variational-grid/`；可改文件名，但服务配置要求路径保持在该目录内。
 - 查看日志：`journalctl -u variational-grid -f`
+- 网页日志：`journalctl -u variational-grid-web -f`；重启网页：`sudo systemctl restart variational-grid-web`
 - 停止：`sudo systemctl stop variational-grid`
 - 修改配置后：`sudo systemctl restart variational-grid`
 - 刷新会话：重复执行安装命令；有效会话保留，已过期会话重新提示输入。

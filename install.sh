@@ -8,6 +8,7 @@ usage() {
 Usage: install.sh [--compare|--single|--help]
 Debian 12+ / Ubuntu 24.04+, with systemd and Python 3.11+.
 New installs run the 0.15 / 0.20 / 0.25 paper comparison by default.
+The comparison includes a localhost dashboard on port 8765, accessed over SSH.
 Repeating the command upgrades code and preserves mode, settings and data.
   --compare  Start the three-grid comparison (also switches existing installs).
   --single   Start one grid using config.json.
@@ -161,6 +162,35 @@ WantedBy=multi-user.target
 UNIT
 if [[ $mode == compare ]]; then
   sed -i 's|^ExecStart=.*|ExecStart=/usr/bin/python3 -m variational_grid compare --experiments /etc/variational-grid/experiments.json|' /etc/systemd/system/variational-grid.service
+  cat >/etc/systemd/system/variational-grid-web.service <<'UNIT'
+[Unit]
+Description=Variational read-only grid dashboard (localhost)
+After=variational-grid.service
+
+[Service]
+Type=simple
+User=variational-grid
+Group=variational-grid
+WorkingDirectory=/opt/variational-grid/current
+ExecStart=/usr/bin/python3 -m variational_grid dashboard --experiments /etc/variational-grid/experiments.json --port 8765
+Restart=on-failure
+RestartSec=10
+UMask=0077
+Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=PYTHONUNBUFFERED=1
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+# SQLite read-only connections may need to maintain shared-memory sidecars.
+ReadWritePaths=/var/lib/variational-grid
+RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
+
+[Install]
+WantedBy=multi-user.target
+UNIT
+elif [[ -f /etc/systemd/system/variational-grid-web.service ]]; then
+  systemctl disable --now variational-grid-web.service
 fi
 printf '%s\n' "$mode" >"$conf/mode"
 chmod 644 "$conf/mode"
@@ -168,12 +198,21 @@ systemctl daemon-reload
 systemctl enable variational-grid.service
 systemctl restart variational-grid.service
 systemctl --no-pager --full status variational-grid.service
+if [[ $mode == compare ]]; then
+  systemctl enable variational-grid-web.service
+  systemctl restart variational-grid-web.service
+  systemctl --no-pager --full status variational-grid-web.service
+fi
 echo 'Paper simulation started. Settings and ledger are preserved on repeat installation.'
 printf 'Service mode: %s\n' "$mode"
 echo 'Settings: /etc/variational-grid/config.json'
 if [[ $mode == compare ]]; then
   echo 'Experiments: /etc/variational-grid/experiments.json'
   echo 'Report: <output_dir from experiments.json>/public/index.html'
+  echo 'Dashboard: run this on your own computer (keep the terminal open):'
+  echo '  ssh -N -o ExitOnForwardFailure=yes -L 18765:127.0.0.1:8765 USER@SERVER_IP'
+  echo 'Then open http://127.0.0.1:18765/ in your browser. No public web port is required.'
+  echo 'Dashboard logs: journalctl -u variational-grid-web -f'
 fi
 echo 'Logs: journalctl -u variational-grid -f'
 echo 'Stop: sudo systemctl stop variational-grid'
