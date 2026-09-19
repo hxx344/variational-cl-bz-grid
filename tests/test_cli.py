@@ -27,6 +27,12 @@ class CliTests(unittest.TestCase):
         self.assertEqual(Path(config.state_file), (self.config.parent / "data/paper.sqlite3").resolve())
         self.assertEqual(Path(config.session_file), (self.config.parent / "data/session.json").resolve())
 
+    def test_configuration_rejects_overlapping_runtime_files(self):
+        for changes in ({"state_file": "data/./session.json"}, {"session_file": "config.json"}, {"state_file": ""}):
+            self.config.write_text(json.dumps({**asdict(Config()), **changes}), encoding="utf-8")
+            with self.assertRaises(GridError):
+                configuration(self.config)
+
     def test_missing_history_pauses_without_fetching_quotes(self):
         class FakeClient:
             def __init__(self, *_):

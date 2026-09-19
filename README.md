@@ -83,7 +83,7 @@ python -m unittest discover -s tests -v
 - 盈亏字段明确标为 `before_funding`：**未计实际资金费**。杠杆保证金是本地估算，不复制交易所风险引擎、维持保证金或强平机制；这不是实盘收益评估。
 - JWT 的 `exp` 仅用作本地过期提醒，签名与有效性通过服务端 `/me` 检查。会话文件每次请求重新读取，更新令牌不必重启正常循环。401/403 或过期后重新导入会话即可；首次启动验证失败会退出。
 
-凭据仅保存于忽略提交的本地文件；POSIX 下会话文件要求 `0600`。Windows 请保留个人目录的账户访问权限。日志不打印令牌、原始服务端错误或请求头。登录令牌具有账户权限，应按密码保管；程序不需要钱包私钥。
+凭据仅保存于忽略提交的本地文件；POSIX 下会话文件要求 `0600`。Windows 使用当前账户的 [DPAPI 加密](https://learn.microsoft.com/en-us/windows/win32/api/dpapi/nf-dpapi-cryptprotectdata)，不接受明文会话文件，也不会在加密失败时退回明文。换账户或部署到 Linux 时应重新导入令牌，不要直接复制加密会话文件。原始 cURL 捕获文件仍由你保管，程序不会删除它。日志不打印令牌、原始服务端错误或请求头。程序不需要钱包私钥。
 
 ## Linux 一键部署与升级
 
@@ -96,7 +96,7 @@ curl -fsSL https://raw.githubusercontent.com/hxx344/variational-cl-bz-grid/main/
 自动安装 Python 与 Git、下载代码、运行测试、创建独立服务账户和 systemd 服务并启动模拟。首次安装提示隐藏输入 `vr-token`。重复执行同一命令升级，保留配置、会话与账本；旧代码版本保留在 releases 中。
 
 - 参数：`/etc/variational-grid/config.json`
-- 会话、账本：`/var/lib/variational-grid/`
+- 会话、账本：`/var/lib/variational-grid/`；可改文件名，但服务配置要求路径保持在该目录内。
 - 查看日志：`journalctl -u variational-grid -f`
 - 停止：`sudo systemctl stop variational-grid`
 - 修改配置后：`sudo systemctl restart variational-grid`

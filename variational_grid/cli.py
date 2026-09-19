@@ -5,7 +5,6 @@ import getpass
 import json
 from pathlib import Path
 import sqlite3
-import sys
 import time
 from concurrent.futures import ThreadPoolExecutor
 
@@ -22,8 +21,11 @@ def emit(data):
 def configuration(path):
     path = Path(path).resolve()
     config = Config.load(path)
-    return replace(config, session_file=str((path.parent / config.session_file).resolve()),
-                   state_file=str((path.parent / config.state_file).resolve()))
+    resolved = replace(config, session_file=str((path.parent / config.session_file).resolve()),
+                       state_file=str((path.parent / config.state_file).resolve()))
+    if resolved.session_file == resolved.state_file or path in (Path(resolved.session_file), Path(resolved.state_file)):
+        raise GridError("Configuration, session and ledger must use separate files")
+    return resolved
 
 
 def paired(function):

@@ -11,7 +11,8 @@ import urllib.error
 import urllib.parse
 import urllib.request
 
-from .models import D, GridError, HOUR, WINDOW, Quote, timestamp, utc
+from .models import D, GridError, HOUR, WINDOW, Quote, utc
+from .protection import decode_session, encode_session
 
 ORIGIN = "https://omni.variational.io"
 ME = ORIGIN + "/api/me"
@@ -81,6 +82,8 @@ def import_curl(text):
 
 def save_session(path, data):
     token_expiry(data.get("token"))
+    # Encrypt before creating a file: plaintext never touches Windows storage.
+    stored = encode_session(data)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
     temporary = path.with_name(path.name + ".new")
@@ -88,7 +91,7 @@ def save_session(path, data):
         # O_EXCL rejects an unexpected existing file or symlink.
         fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
-            json.dump(data, handle)
+            json.dump(stored, handle)
         os.replace(temporary, path)
     except OSError:
         raise GridError("Could not securely save session; check destination permissions") from None
@@ -110,7 +113,7 @@ class Client:
                 raise GridError("Session file is too large")
             if os.name == "posix" and self.session_file.stat().st_mode & 0o077:
                 raise GridError("Session permissions must be 0600")
-            data = json.loads(self.session_file.read_text(encoding="utf-8-sig"))
+            data = decode_session(json.loads(self.session_file.read_text(encoding="utf-8-sig")))
             token = data["token"]
             if token_expiry(token) <= time.time() + 30:
                 raise GridError("Session expired or expiring; import a fresh browser session")

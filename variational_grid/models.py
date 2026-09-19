@@ -74,8 +74,8 @@ class Config:
                 raise GridError(f"{name} must be a positive integer")
         if self.max_levels > 100 or self.poll_seconds < 5:
             raise GridError("max_levels must be <= 100 and poll_seconds >= 5")
-        if not isinstance(self.session_file, str) or not isinstance(self.state_file, str):
-            raise GridError("File paths must be strings")
+        if not isinstance(self.session_file, str) or not isinstance(self.state_file, str) or not self.session_file.strip() or not self.state_file.strip():
+            raise GridError("File paths must be non-empty strings")
         return self
 
     @classmethod
