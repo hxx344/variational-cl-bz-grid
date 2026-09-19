@@ -23,11 +23,13 @@ class InstallTests(unittest.TestCase):
         self.source = self.root / "repository"
         self.source.mkdir()
         shutil.copytree(self.project / "variational_grid", self.source / "variational_grid", ignore=shutil.ignore_patterns("__pycache__"))
-        for name in ("config.example.json", "experiments.example.json"):
+        for name in ("config.example.json", "experiments.example.json", "install.sh", "pyproject.toml"):
             shutil.copy(self.project / name, self.source / name)
         (self.source / "tests").mkdir()
         (self.source / "tests/test_release.py").write_text(
-            "import unittest\nclass ReleaseTest(unittest.TestCase):\n    def test_release(self): self.assertTrue(True)\n")
+            "import os, unittest\nfrom pathlib import Path\nclass ReleaseTest(unittest.TestCase):\n"
+            "    def test_release(self):\n"
+            "        with Path(os.environ['GRID_INSTALL_TEST_VALIDATION_LOG']).open('a') as log: log.write('validated\\n')\n")
         self.git("init", "--initial-branch=main")
         self.git("config", "user.name", "Installer fixture")
         self.git("config", "user.email", "installer@example.invalid")
@@ -56,6 +58,9 @@ class InstallTests(unittest.TestCase):
         self.bin = self.root / "bin"
         self.bin.mkdir()
         self.log = self.root / "commands.jsonl"
+        self.service_state = self.root / "services.json"
+        self.validation_log = self.root / "validation.log"
+        real_git = shutil.which("git")
         shim = f'''#!{sys.executable}
 import json, os, subprocess, sys
 from pathlib import Path
@@ -63,6 +68,25 @@ name = Path(sys.argv[0]).name
 args = sys.argv[1:]
 with open(os.environ["GRID_INSTALL_TEST_LOG"], "a") as log:
     log.write(json.dumps([name, *args]) + "\\n")
+if name == "git":
+    os.execv({real_git!r}, ["git", *args])
+if name == "dpkg-query":
+    if args[-1] in os.environ.get("GRID_INSTALL_TEST_MISSING_PACKAGES", "").split(","):
+        raise SystemExit(1)
+    print("installed")
+if name == "systemctl":
+    path = Path(os.environ["GRID_INSTALL_TEST_SERVICE_STATE"])
+    state = json.loads(path.read_text()) if path.exists() else {{}}
+    service = args[-1]
+    row = state.setdefault(service, {{"active": False, "enabled": False}})
+    if args[0] == "is-active": raise SystemExit(0 if row["active"] else 3)
+    if args[0] == "is-enabled": raise SystemExit(0 if row["enabled"] else 1)
+    if args[0] == "daemon-reload" and os.environ.get("GRID_INSTALL_TEST_FAIL_RELOAD"):
+        raise SystemExit(1)
+    if args[0] == "enable": row["enabled"] = True
+    if args[0] == "restart": row["active"] = True
+    if args[0] == "disable": row.update(active=False, enabled=False)
+    path.write_text(json.dumps(state))
 if name == "install":
     filtered = []
     i = 0
@@ -82,12 +106,14 @@ if name == "runuser":
         # Execute the actual missing-file error path, which cannot contact the API.
         raise SystemExit(subprocess.call(args[3:]))
 '''
-        for name in ("apt-get", "id", "useradd", "install", "runuser", "systemctl"):
+        for name in ("apt-get", "dpkg-query", "git", "id", "useradd", "install", "runuser", "systemctl"):
             path = self.bin / name
             path.write_text(shim)
             path.chmod(0o755)
         self.env = {**os.environ, "PATH": str(self.bin) + os.pathsep + os.environ["PATH"],
-                    "GRID_INSTALL_TEST_LOG": str(self.log), "PYTHONDONTWRITEBYTECODE": "1"}
+                    "GRID_INSTALL_TEST_LOG": str(self.log), "PYTHONDONTWRITEBYTECODE": "1",
+                    "GRID_INSTALL_TEST_SERVICE_STATE": str(self.service_state),
+                    "GRID_INSTALL_TEST_VALIDATION_LOG": str(self.validation_log)}
 
     def git(self, *args):
         return subprocess.check_output(["git", "-C", str(self.source), *args], stderr=subprocess.STDOUT, text=True).strip()
@@ -101,6 +127,92 @@ if name == "runuser":
         result = subprocess.run(["bash", str(self.script), *args], env=self.env, capture_output=True, text=True, timeout=60)
         self.assertEqual(result.returncode, expected, result.stdout + result.stderr)
         return result
+
+    def calls(self):
+        return [json.loads(line) for line in self.log.read_text().splitlines()]
+
+    def restarts(self):
+        return [call[-1] for call in self.calls() if call[:2] == ['systemctl', 'restart']]
+
+    def test_repeat_skips_package_fetch_archive_tests_and_restarts(self):
+        self.install()
+        validated = self.validation_log.read_bytes()
+        self.log.write_text('')
+        result = self.install()
+        self.assertIn('skipping full test suite', result.stdout)
+        self.assertEqual(self.validation_log.read_bytes(), validated)
+        self.assertFalse(any(call[0] == 'apt-get' for call in self.calls()))
+        self.assertFalse(any(call[0] == 'git' and any(arg in ('fetch', 'clone', 'archive') for arg in call[1:]) for call in self.calls()))
+        self.assertEqual(self.restarts(), [])
+        self.assertNotIn(['systemctl', 'daemon-reload'], self.calls())
+        self.assertFalse(list(self.app.glob('.deploy.*')))
+
+    def test_only_missing_packages_are_installed(self):
+        self.env['GRID_INSTALL_TEST_MISSING_PACKAGES'] = 'ca-certificates'
+        self.install()
+        self.assertEqual([c for c in self.calls() if c[0]=='apt-get'], [
+            ['apt-get', 'update', '-qq'], ['apt-get', 'install', '-y', '-qq', 'ca-certificates']])
+        self.env.pop('GRID_INSTALL_TEST_MISSING_PACKAGES')
+        self.log.write_text('')
+        self.install()
+        self.assertFalse(any(c[0]=='apt-get' for c in self.calls()))
+
+    def test_docs_reuse_validation_and_web_change_only_restarts_web(self):
+        self.install()
+        validated = self.validation_log.read_bytes()
+        (self.source / 'README.md').write_text('Documentation only')
+        revision = self.commit()
+        self.log.write_text('')
+        self.install()
+        self.assertEqual((self.app / 'current').resolve().name, revision)
+        self.assertEqual(self.validation_log.read_bytes(), validated)
+        self.assertEqual(self.restarts(), [])
+        with (self.source / 'variational_grid/web/styles.css').open('a') as file:
+            file.write('\n/* New UI version */\n')
+        self.commit()
+        self.log.write_text('')
+        self.install()
+        self.assertEqual(len(self.validation_log.read_text().splitlines()), 2)
+        self.assertEqual(self.restarts(), ['variational-grid-web.service'])
+
+    def test_runtime_and_configuration_changes_restart_affected_services(self):
+        self.install()
+        with (self.source / 'variational_grid/engine.py').open('a') as file:
+            file.write('\n# Runtime revision\n')
+        self.commit()
+        self.log.write_text('')
+        self.install()
+        self.assertEqual(set(self.restarts()), {'variational-grid.service','variational-grid-web.service'})
+        validated = self.validation_log.read_bytes()
+        config_path = self.conf / 'config.json'
+        config = json.loads(config_path.read_text())
+        config['poll_seconds'] = 20
+        config_path.write_text(json.dumps(config))
+        self.log.write_text('')
+        self.install()
+        self.assertEqual(set(self.restarts()), {'variational-grid.service','variational-grid-web.service'})
+        self.assertEqual(self.validation_log.read_bytes(), validated)
+
+    def test_inactive_service_is_repaired_without_restarting_healthy_peer(self):
+        self.install()
+        state = json.loads(self.service_state.read_text())
+        state['variational-grid-web.service'].update(active=False, enabled=False)
+        self.service_state.write_text(json.dumps(state))
+        self.log.write_text('')
+        self.install()
+        self.assertEqual(self.restarts(), ['variational-grid-web.service'])
+        self.assertIn(['systemctl', 'enable', 'variational-grid-web.service'], self.calls())
+
+    def test_interrupted_unit_reload_is_retried(self):
+        self.install()
+        self.web_unit.write_text(self.web_unit.read_text() + '\n# Modified unit\n')
+        self.env['GRID_INSTALL_TEST_FAIL_RELOAD'] = '1'
+        self.install(expected=1)
+        self.env.pop('GRID_INSTALL_TEST_FAIL_RELOAD')
+        self.log.write_text('')
+        self.install()
+        self.assertIn(['systemctl', 'daemon-reload'], self.calls())
+        self.assertEqual(self.restarts(), ['variational-grid-web.service'])
 
     def test_fresh_install_and_upgrade_preserve_configuration_data_and_mode(self):
         self.install()

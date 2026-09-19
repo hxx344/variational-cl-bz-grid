@@ -10,6 +10,7 @@ Debian 12+ / Ubuntu 24.04+, with systemd and Python 3.11+.
 New installs run the 0.15 / 0.20 / 0.25 paper comparison by default.
 The comparison includes a localhost dashboard on port 9876, accessed over SSH.
 Repeating the command upgrades code and preserves mode, settings and data.
+Unchanged dependencies, validated code and running services are reused.
   --compare  Start the three-grid comparison (also switches existing installs).
   --single   Start one grid using config.json.
   --help     Show this help without installing anything.
@@ -42,8 +43,18 @@ fi
 
 export DEBIAN_FRONTEND=noninteractive
 export PYTHONDONTWRITEBYTECODE=1
-apt-get update -qq
-apt-get install -y -qq python3 git ca-certificates
+missing_packages=()
+for package in python3 git ca-certificates; do
+  if [[ $(dpkg-query -W -f='${db:Status-Status}' "$package" 2>/dev/null || true) != installed ]]; then
+    missing_packages+=("$package")
+  fi
+done
+if (( ${#missing_packages[@]} )); then
+  apt-get update -qq
+  apt-get install -y -qq "${missing_packages[@]}"
+else
+  echo 'Dependencies present; skipping apt update/install.'
+fi
 python3 -c 'import sys; assert sys.version_info >= (3, 11), "Python 3.11+ required (Debian 12+ / Ubuntu 24.04+)"'
 
 app=/opt/variational-grid
@@ -59,29 +70,54 @@ install -d -m 755 "$app" "$app/releases" "$conf"
 install -d -m 700 -o "$account" -g "$account" "$state"
 if [[ ! -d "$app/source/.git" ]]; then
   git clone --depth 1 --branch main "$repository" "$app/source"
+  revision=$(git -C "$app/source" rev-parse 'origin/main^{commit}')
 else
   [[ $(git -C "$app/source" remote get-url origin) == "$repository" ]] || { echo 'Unexpected existing source remote.' >&2; exit 1; }
-  git -C "$app/source" fetch --depth 1 origin main
+  revision=$(git -C "$app/source" ls-remote --exit-code origin refs/heads/main | cut -f1)
+  [[ $revision =~ ^[a-f0-9]{40}$ ]] || { echo 'Cannot determine the remote main revision.' >&2; exit 1; }
+  if ! git -C "$app/source" cat-file -e "$revision^{commit}" 2>/dev/null; then
+    git -C "$app/source" fetch --depth 1 origin "$revision"
+  else
+    echo 'Requested Git objects cached; skipping fetch.'
+  fi
 fi
-revision=$(git -C "$app/source" rev-parse 'origin/main^{commit}')
 [[ $revision =~ ^[a-f0-9]{40}$ ]] || exit 1
 release="$app/releases/$revision"
 staging=
+deployment=
 cleanup() {
   if [[ -n $staging && $staging == "$app/releases/.staging."* && -d $staging ]]; then
     rm -rf -- "$staging"
   fi
+  if [[ -n $deployment && $deployment == "$app/.deploy."* && -d $deployment ]]; then
+    rm -rf -- "$deployment"
+  fi
 }
 trap cleanup EXIT
+# Tests depend on their source, deployment logic, examples and Python runtime.
+# Docs-only revisions can reuse a successful result; failed runs never write it.
+validation_key=$({
+  python3 --version
+  git -C "$app/source" ls-tree -r "$revision" -- variational_grid tests install.sh config.example.json experiments.example.json pyproject.toml
+} | sha256sum | cut -d ' ' -f1)
+install -d -m 755 "$app/validated"
+validate_release() {
+  if [[ $(cat "$app/validated/$validation_key" 2>/dev/null || true) == "$validation_key" ]]; then
+    echo 'Matching code/tests/Python already validated; skipping full test suite.'
+  else
+    (cd "$1" && python3 -m unittest discover -s tests -v)
+    printf '%s\n' "$validation_key" >"$app/validated/$validation_key"
+  fi
+}
 if [[ ! -d "$release" ]]; then
   staging=$(mktemp -d "$app/releases/.staging.XXXXXX")
   git -C "$app/source" archive "$revision" | tar -x -C "$staging"
-  (cd "$staging" && python3 -m unittest discover -s tests -v)
+  validate_release "$staging"
   chmod -R u=rwX,go=rX "$staging"
   mv -- "$staging" "$release"
   staging=
 else
-  (cd "$release" && python3 -m unittest discover -s tests -v)
+  validate_release "$release"
 fi
 if [[ ! -f "$conf/config.json" ]]; then
   python3 - "$release/config.example.json" "$conf/config.json" <<'PY'
@@ -132,8 +168,25 @@ if ! (cd "$release" && runuser -u "$account" -- python3 -m variational_grid chec
   # /dev/tty keeps this interactive even when the installer arrives through curl | bash.
   (cd "$release" && runuser -u "$account" -- python3 -m variational_grid init-session --config "$conf/config.json" </dev/tty)
 fi
-ln -sfn "$release" "$app/current"
-cat >/etc/systemd/system/variational-grid.service <<'UNIT'
+# Always validate configuration and the session above. Neither requires a restart
+# when unchanged; refreshed session files are already reloaded by the simulator.
+settings_key=$({
+  printf '%s\n' "$mode"
+  sha256sum "$conf/config.json"
+  if [[ $mode == compare ]]; then sha256sum "$conf/experiments.json"; fi
+} | sha256sum | cut -d ' ' -f1)
+engine_key=$({
+  printf '%s\n' "$settings_key"
+  python3 --version
+  git -C "$app/source" ls-tree -r "$revision" -- variational_grid | sed '\|[[:space:]]variational_grid/web/|d; \|[[:space:]]variational_grid/dashboard.py$|d'
+} | sha256sum | cut -d ' ' -f1)
+web_key=$({
+  printf '%s\n' "$settings_key"
+  python3 --version
+  git -C "$app/source" ls-tree -r "$revision" -- variational_grid
+} | sha256sum | cut -d ' ' -f1)
+deployment=$(mktemp -d "$app/.deploy.XXXXXX")
+cat >"$deployment/variational-grid.service" <<'UNIT'
 [Unit]
 Description=Variational CL BZ paper spread grid
 After=network-online.target
@@ -161,8 +214,8 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 WantedBy=multi-user.target
 UNIT
 if [[ $mode == compare ]]; then
-  sed -i 's|^ExecStart=.*|ExecStart=/usr/bin/python3 -m variational_grid compare --experiments /etc/variational-grid/experiments.json|' /etc/systemd/system/variational-grid.service
-  cat >/etc/systemd/system/variational-grid-web.service <<'UNIT'
+  sed -i 's|^ExecStart=.*|ExecStart=/usr/bin/python3 -m variational_grid compare --experiments /etc/variational-grid/experiments.json|' "$deployment/variational-grid.service"
+  cat >"$deployment/variational-grid-web.service" <<'UNIT'
 [Unit]
 Description=Variational read-only grid dashboard (localhost)
 After=variational-grid.service
@@ -190,20 +243,54 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 WantedBy=multi-user.target
 UNIT
 elif [[ -f /etc/systemd/system/variational-grid-web.service ]]; then
-  systemctl disable --now variational-grid-web.service
+  if systemctl is-active --quiet variational-grid-web.service || systemctl is-enabled --quiet variational-grid-web.service; then
+    systemctl disable --now variational-grid-web.service
+  fi
 fi
-printf '%s\n' "$mode" >"$conf/mode"
-chmod 644 "$conf/mode"
-systemctl daemon-reload
-systemctl enable variational-grid.service
-systemctl restart variational-grid.service
-systemctl --no-pager --full status variational-grid.service
+if [[ $(readlink -f "$app/current" 2>/dev/null || true) != "$release" ]]; then
+  ln -sfn "$release" "$app/current"
+fi
+if [[ $(cat "$conf/mode" 2>/dev/null || true) != "$mode" ]]; then
+  printf '%s\n' "$mode" >"$conf/mode"
+  chmod 644 "$conf/mode"
+fi
+units_changed=false
+engine_unit_changed=false
+web_unit_changed=false
+for service in variational-grid.service variational-grid-web.service; do
+  if [[ -f "$deployment/$service" ]] && ! cmp -s "$deployment/$service" "/etc/systemd/system/$service"; then
+    # Invalidate before writing so an interrupted reload/restart is retried.
+    : >"$app/applied-units"
+    if [[ $service == variational-grid.service ]]; then : >"$app/applied-engine"; else : >"$app/applied-web"; fi
+    install -m 644 "$deployment/$service" "/etc/systemd/system/$service"
+    units_changed=true
+    if [[ $service == variational-grid.service ]]; then engine_unit_changed=true; else web_unit_changed=true; fi
+  fi
+done
+units_key=$({
+  sha256sum /etc/systemd/system/variational-grid.service
+  if [[ -f /etc/systemd/system/variational-grid-web.service ]]; then sha256sum /etc/systemd/system/variational-grid-web.service; fi
+} | sha256sum | cut -d ' ' -f1)
+if $units_changed || [[ $(cat "$app/applied-units" 2>/dev/null || true) != "$units_key" ]]; then
+  systemctl daemon-reload
+  printf '%s\n' "$units_key" >"$app/applied-units"
+fi
+apply_service() {
+  local service=$1 key=$2 unit_changed=$3 stamp=$4
+  if ! systemctl is-enabled --quiet "$service"; then systemctl enable "$service"; fi
+  if [[ $(cat "$stamp" 2>/dev/null || true) != "$key" ]] || $unit_changed || ! systemctl is-active --quiet "$service"; then
+    systemctl restart "$service"
+    systemctl --no-pager --full status "$service"
+    printf '%s\n' "$key" >"$stamp"
+  else
+    printf '%s unchanged and running; skipping restart.\n' "$service"
+  fi
+}
+apply_service variational-grid.service "$engine_key" "$engine_unit_changed" "$app/applied-engine"
 if [[ $mode == compare ]]; then
-  systemctl enable variational-grid-web.service
-  systemctl restart variational-grid-web.service
-  systemctl --no-pager --full status variational-grid-web.service
+  apply_service variational-grid-web.service "$web_key" "$web_unit_changed" "$app/applied-web"
 fi
-echo 'Paper simulation started. Settings and ledger are preserved on repeat installation.'
+echo 'Paper simulation ready. Settings and ledger are preserved on repeat installation.'
 printf 'Service mode: %s\n' "$mode"
 echo 'Settings: /etc/variational-grid/config.json'
 if [[ $mode == compare ]]; then
