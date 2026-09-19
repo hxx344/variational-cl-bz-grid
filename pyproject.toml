@@ -1,0 +1,16 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "variational-cl-bz-grid"
+version = "0.1.0"
+description = "Paper-only CL/BZ equal-barrel spread grid with Variational indicative quotes"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.scripts]
+variational-grid = "variational_grid.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["variational_grid*"]

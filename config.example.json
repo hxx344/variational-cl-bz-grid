@@ -1,0 +1,18 @@
+{
+  "mode": "paper",
+  "paper_balance_usdc": "1000",
+  "quantity_barrels": "1",
+  "grid_step_usdc_per_barrel": "0.20",
+  "max_levels": 8,
+  "paper_leverage": "5",
+  "max_margin_fraction": "0.80",
+  "max_drawdown_fraction": "0.20",
+  "max_holding_hours": 168,
+  "slippage_bps_per_leg": "1",
+  "fee_bps_per_leg": "0",
+  "poll_seconds": 10,
+  "max_quote_age_seconds": 15,
+  "max_pair_skew_seconds": 5,
+  "session_file": "data/session.json",
+  "state_file": "data/paper.sqlite3"
+}
