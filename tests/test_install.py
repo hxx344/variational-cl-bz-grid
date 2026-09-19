@@ -225,7 +225,7 @@ if name == "runuser":
         self.assertIn(["systemctl", "restart", "variational-grid-web.service"], calls)
         self.assertEqual((self.app / "current").resolve().name, self.revision)
         experiments = json.loads((self.conf / "experiments.json").read_text())
-        self.assertEqual([s["overrides"]["grid_step_usdc_per_barrel"] for s in experiments["scenarios"]], ["0.15", "0.20", "0.25"])
+        self.assertEqual([s["overrides"]["grid_step_percent"] for s in experiments["scenarios"]], ["0.5", "1", "2"])
         config = json.loads((self.conf / "config.json").read_text())
         config["paper_balance_usdc"] = "1500"
         (self.conf / "config.json").write_text(json.dumps(config))
@@ -272,9 +272,33 @@ if name == "runuser":
         calls = [json.loads(line) for line in self.log.read_text().splitlines()]
         self.assertFalse(any(call[0] == "systemctl" for call in calls))
 
+    def test_legacy_comparison_upgrade_archives_settings_and_keeps_old_ledgers(self):
+        self.install()
+        path = self.conf / 'experiments.json'
+        spec = json.loads(path.read_text())
+        old_output = self.state / 'comparison-015-020-025'
+        old_output.mkdir()
+        sentinel = old_output / 'ledger-sentinel'
+        sentinel.write_bytes(b'original data')
+        spec['output_dir'] = str(old_output)
+        spec['scenarios'] = [{'name': f'step-{step}', 'overrides': {'grid_step_usdc_per_barrel': step, 'max_levels': 3}}
+                             for step in ('0.15', '0.20', '0.25')]
+        path.write_text(json.dumps(spec))
+        before = path.read_bytes()
+        result = self.install('--compare')
+        self.assertIn('Updated grid steps to 0.5% / 1% / 2%', result.stdout)
+        self.assertEqual((self.conf / 'experiments.absolute-015-020-025.json').read_bytes(), before)
+        self.assertEqual(sentinel.read_bytes(), b'original data')
+        updated = json.loads(path.read_text())
+        self.assertEqual([s['overrides']['grid_step_percent'] for s in updated['scenarios']], ['0.5', '1', '2'])
+        self.assertEqual(updated['output_dir'], str(self.state / 'comparison-pct-05-1-2'))
+        self.log.write_text('')
+        self.install('--compare')
+        self.assertEqual(self.restarts(), [])
+
     def test_help_and_bad_arguments_do_not_change_the_system(self):
         help_result = self.install("--help")
-        self.assertIn("0.15 / 0.20 / 0.25", help_result.stdout)
+        self.assertIn("0.5% / 1% / 2%", help_result.stdout)
         self.install("--unknown", expected=1)
         self.install("--compare", "--single", expected=1)
         self.assertFalse(self.log.exists())

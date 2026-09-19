@@ -60,6 +60,8 @@ class ComparisonTests(unittest.TestCase):
             self.assertEqual([r["opened_pairs"] for r in result["scenarios"]], [1, 1, 0])
             counts = [s.db.execute("SELECT COUNT(*) FROM fills").fetchone()[0] for s in cohort.stores.values()]
             self.assertEqual(counts, [2, 2, 0])
+            self.assertEqual([r['fill_count'] for r in result['scenarios']], [2, 2, 0])
+            self.assertEqual([r['volume_barrels'] for r in result['scenarios']], ['2', '2', '0'])
             self.assertEqual(cohort.db.execute("SELECT COUNT(*) FROM frames").fetchone()[0], 1)
 
     def test_crash_after_all_legs_before_publishing_recovers(self):

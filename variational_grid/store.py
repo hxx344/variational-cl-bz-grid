@@ -5,7 +5,19 @@ import os
 from pathlib import Path
 import sqlite3
 
-from .models import GridError
+from .models import D, GridError, dec
+
+
+def fill_totals(db, through=None):
+    """Exact gross volume, both legs and both phases; never sum TEXT as SQLite floats."""
+    qty, notional, count = D(0), D(0), 0
+    query = "SELECT qty,price FROM fills"
+    for amount, price in db.execute(query + (" WHERE ts<=?" if through is not None else ""),
+                                    (through,) if through is not None else ()):
+        qty += dec(amount)
+        notional += dec(amount) * dec(price)
+        count += 1
+    return {"volume_barrels": str(qty), "turnover_usdc": str(notional), "fill_count": count}
 
 
 class ProcessLock:
@@ -73,6 +85,16 @@ class Store:
                 self.set("fees", "0")
                 self.set("realized", "0")
                 self.set("schema_version", "1")
+        if self.get("volume_barrels") is None:
+            # One-time backfill for old ledgers, from durable executions only.
+            with self.transaction():
+                for key, value in fill_totals(self.db).items():
+                    self.set(key, value)
+
+    def volume(self):
+        return {"volume_barrels": self.get("volume_barrels"),
+                "turnover_usdc": self.get("turnover_usdc"),
+                "fill_count": int(self.get("fill_count"))}
 
     def get(self, key, default=None):
         row = self.db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()

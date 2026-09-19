@@ -14,7 +14,7 @@ from .models import Config, D, GridError, HOUR, WINDOW, Quote, dec, rolling_cent
 from .store import ProcessLock, Store
 
 OVERRIDES = {
-    "paper_balance_usdc", "quantity_barrels", "grid_step_usdc_per_barrel", "max_levels",
+    "paper_balance_usdc", "quantity_barrels", "grid_step_usdc_per_barrel", "grid_step_percent", "max_levels",
     "paper_leverage", "max_margin_fraction", "max_drawdown_fraction", "max_holding_hours",
     "slippage_bps_per_leg", "fee_bps_per_leg",
 }
@@ -50,7 +50,11 @@ class Experiment:
                 if name.lower() in {x.lower() for x in scenarios} or not isinstance(item["overrides"], dict) or set(item["overrides"]) - OVERRIDES:
                     raise ValueError()
                 state = output / "ledgers" / (name + ".sqlite3")
-                scenarios[name] = replace(base, **item["overrides"], state_file=str(state)).validate()
+                overrides = dict(item["overrides"])
+                # Explicit legacy absolute overrides also work with a percentage base config.
+                if "grid_step_usdc_per_barrel" in overrides and "grid_step_percent" not in overrides:
+                    overrides["grid_step_percent"] = None
+                scenarios[name] = replace(base, **overrides, state_file=str(state)).validate()
             if any(p.is_relative_to(output) for p in (path, Path(base.session_file), Path(base.state_file), (path.parent / data["base_config"]).resolve())):
                 raise GridError("Experiment output must be separate from existing configuration, session and single-run ledger")
             return cls(base, output, scenarios)
@@ -211,6 +215,9 @@ class Cohort:
                 snapshots[name] = engine.tick(frame.center, *frame.quotes[quantity_key(engine.config.quantity_barrels)], frame.ts, allow_open=frame.allow_open)
             else:
                 snapshots[name] = store.snapshot()
+                # Old versions can leave a fully applied frame unpublished at shutdown.
+                if "volume_barrels" not in snapshots[name]:
+                    snapshots[name].update(store.volume())
             if float(store.get("last_tick")) != frame.ts:
                 raise GridError("Scenario timestamps differ; comparison not published")
         previous = self.latest()
@@ -226,7 +233,8 @@ class Cohort:
             opens = sum(a["action"] == "open" for a in snapshot["actions"])
             closes = [a for a in snapshot["actions"] if a["action"] == "close"]
             wins = sum(dec(self.stores[name].db.execute("SELECT net_pnl FROM lots WHERE id=?", (a["lot_id"],)).fetchone()[0]) > 0 for a in closes)
-            rows.append({**snapshot, "name": name, "grid_step": config.grid_step_usdc_per_barrel,
+            rows.append({**snapshot, "name": name, "grid_step": str(config.grid_step(frame.center)),
+                         "grid_step_percent": config.grid_step_percent,
                          "quantity_barrels": config.quantity_barrels, "initial_balance_usdc": config.paper_balance_usdc,
                          "max_levels": config.max_levels, "fee_bps": config.fee_bps_per_leg, "slippage_bps": config.slippage_bps_per_leg,
                          "return_fraction": str(dec(snapshot["total_pnl_usdc"]) / dec(config.paper_balance_usdc)),
@@ -284,7 +292,7 @@ def run_comparison(args):
                 result = cohort.ingest(frame)
                 failures = 0
                 emit({"mode": result["mode"], "time_utc": result["time_utc"], "sample_count": result["sample_count"],
-                      "scenarios": [{k: r[k] for k in ("name", "total_pnl_usdc", "open_pairs", "closed_pairs", "max_drawdown_fraction")} for r in result["scenarios"]]})
+                      "scenarios": [{k: r[k] for k in ("name", "total_pnl_usdc", "open_pairs", "closed_pairs", "max_drawdown_fraction", "volume_barrels", "turnover_usdc", "fill_count")} for r in result["scenarios"]]})
             count += 1
             if args.once or args.iterations and count >= args.iterations:
                 return 2 if failures else 0

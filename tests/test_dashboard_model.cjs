@@ -2,6 +2,14 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const M = require('../variational_grid/web/model.js');
 
+test('percentage labels do not confuse effective dollar steps or legacy grids', () => {
+  assert.equal(M.gridLabel({grid_step_percent:'0.5',grid_step:'0.02'}), '间距 0.5%');
+  assert.equal(M.gridLabel({grid_step_percent:'1',grid_step:'0.04'}), '间距 1%');
+  assert.equal(M.gridLabel({grid_step_percent:'2',grid_step:'0.08'}), '间距 2%');
+  assert.equal(M.gridLabel({grid_step_percent:'0.25',grid_step:'0.01'}), '间距 0.25%');
+  assert.equal(M.gridLabel({grid_step:'0.20'}), '间距 0.20 USDC/桶');
+});
+
 test('unknown values stay missing and signed losses are explicit', () => {
   for(const value of [null, undefined, '', NaN, Infinity]) assert.equal(M.number(value), '—');
   assert.equal(M.number(0), '0.0000');

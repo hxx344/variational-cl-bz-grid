@@ -87,6 +87,22 @@ class DashboardTests(unittest.TestCase):
         with self.assertRaises(GridError):
             read_dashboard(self.experiment)
 
+    def test_legacy_summary_volume_is_backfilled_only_through_published_frame(self):
+        with Cohort(self.experiment) as cohort:
+            result = cohort.ingest(frame())
+            expected = read_dashboard(self.experiment)['summary']['scenarios']
+            for row in result['scenarios']:
+                for key in ('volume_barrels', 'turnover_usdc', 'fill_count'):
+                    row.pop(key)
+            with cohort.db:
+                cohort.db.execute('UPDATE summaries SET payload=?', (json.dumps(result),))
+            next_frame = frame('6.3', 1)
+            cohort.engines['step-0.15'].tick(next_frame.center, *next_frame.quotes['1'], next_frame.ts)
+            actual = read_dashboard(self.experiment)['summary']['scenarios']
+            for before, after in zip(expected, actual):
+                for key in ('volume_barrels', 'turnover_usdc', 'fill_count'):
+                    self.assertEqual(before[key], after[key])
+
     def test_waiting_and_missing_frame_are_not_reported_as_flat_positions(self):
         data = read_dashboard(self.experiment)
         self.assertIsNone(data['summary'])

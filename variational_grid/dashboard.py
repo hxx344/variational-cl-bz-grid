@@ -13,6 +13,7 @@ from urllib.parse import parse_qs, urlsplit
 from .comparison import Experiment, Frame, quantity_key
 from .engine import Engine
 from .models import GridError, dec
+from .store import fill_totals
 
 WINDOWS = {"1h": 3600, "24h": 86400, "7d": 604800}
 ASSETS = {"/": ("index.html", "text/html; charset=utf-8"),
@@ -97,7 +98,8 @@ def read_dashboard(experiment, window="24h"):
         if config is None:
             raise GridError("Dashboard configuration differs from published experiment")
         row.update(paper_leverage=config.paper_leverage, max_margin_fraction=config.max_margin_fraction,
-                   max_holding_hours=config.max_holding_hours)
+                   max_holding_hours=config.max_holding_hours, grid_step_percent=config.grid_step_percent,
+                   grid_step=str(config.grid_step(frame.center)))
         # Value with the economics recorded in the ledger, never silently with edited config.
         with closing(read_db(config.state_file)) as db:
             db.row_factory = sqlite3.Row
@@ -108,6 +110,9 @@ def read_dashboard(experiment, window="24h"):
             last_tick = db.execute("SELECT value FROM meta WHERE key='last_tick'").fetchone()
             if last_tick is None or float(last_tick[0]) < frame.ts:
                 raise GridError("Scenario ledger is older than the published comparison")
+            if "volume_barrels" not in row:
+                # Read-only compatibility: a ledger may be ahead of the last shared frame.
+                row.update(fill_totals(db, through=frame.ts))
             positions = db.execute("SELECT * FROM lots WHERE opened<=? AND (closed IS NULL OR closed>?) ORDER BY level,id",
                                    (frame.ts, frame.ts)).fetchall()
             valuation = Engine(config, None)
@@ -115,7 +120,8 @@ def read_dashboard(experiment, window="24h"):
                 lot = dict(record)
                 pnl = valuation.exit_value(lot, *frame.quotes[quantity_key(config.quantity_barrels)])[0] - dec(lot["entry_fee"])
                 result["positions"].append({"scenario": name, **{k: lot[k] for k in ("id", "direction", "level", "qty", "entry_center", "entry_cl", "entry_bz", "entry_fee", "opened")},
-                                            "unrealized_pnl_usdc": str(pnl), "valued_at": frame.ts})
+                                            "unrealized_pnl_usdc": str(pnl), "valued_at": frame.ts,
+                                            "target_pnl_usdc": str(dec(lot["qty"]) * config.grid_step(lot["entry_center"]))})
             trades = db.execute("SELECT * FROM lots WHERE closed IS NOT NULL AND closed<=? ORDER BY closed DESC,id DESC LIMIT 100", (frame.ts,)).fetchall()
             for record in trades:
                 result["trades"].append({"scenario": name, **dict(record)})

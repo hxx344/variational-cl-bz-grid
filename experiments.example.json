@@ -1,9 +1,9 @@
 {
   "base_config": "config.local.json",
-  "output_dir": "data/comparison-015-020-025",
+  "output_dir": "data/comparison-pct-05-1-2",
   "scenarios": [
-    {"name": "step-0.15", "overrides": {"grid_step_usdc_per_barrel": "0.15"}},
-    {"name": "step-0.20", "overrides": {"grid_step_usdc_per_barrel": "0.20"}},
-    {"name": "step-0.25", "overrides": {"grid_step_usdc_per_barrel": "0.25"}}
+    {"name": "step-0.5pct", "overrides": {"grid_step_percent": "0.5"}},
+    {"name": "step-1pct", "overrides": {"grid_step_percent": "1"}},
+    {"name": "step-2pct", "overrides": {"grid_step_percent": "2"}}
   ]
 }

@@ -43,6 +43,8 @@ class Config:
     paper_balance_usdc: str = "1000"
     quantity_barrels: str = "1"
     grid_step_usdc_per_barrel: str = "0.20"
+    # None preserves existing absolute-step configurations and ledger identities.
+    grid_step_percent: str | None = None
     max_levels: int = 8
     paper_leverage: str = "5"
     max_margin_fraction: str = "0.80"
@@ -62,6 +64,8 @@ class Config:
         for name in ("paper_balance_usdc", "quantity_barrels", "grid_step_usdc_per_barrel", "paper_leverage"):
             if dec(getattr(self, name)) <= 0:
                 raise GridError(f"{name} must be positive")
+        if self.grid_step_percent is not None and not D("0") < dec(self.grid_step_percent) <= D("100"):
+            raise GridError("grid_step_percent must be in (0, 100]; 1 means 1%")
         for name in ("max_margin_fraction", "max_drawdown_fraction"):
             if not D("0") < dec(getattr(self, name)) < D("1"):
                 raise GridError(f"{name} must be between 0 and 1")
@@ -89,9 +93,18 @@ class Config:
     def strategy_identity(self):
         # Changing economics while a ledger is open must never silently reinterpret it.
         data = asdict(self)
+        if self.grid_step_percent is None:
+            data.pop("grid_step_percent")
+        else:
+            data.pop("grid_step_usdc_per_barrel")
         for name in ("poll_seconds", "max_quote_age_seconds", "max_pair_skew_seconds", "session_file", "state_file"):
             data.pop(name)
         return json.dumps(data, sort_keys=True, separators=(",", ":"))
+
+    def grid_step(self, center):
+        if self.grid_step_percent is None:
+            return dec(self.grid_step_usdc_per_barrel)
+        return abs(dec(center)) * dec(self.grid_step_percent) / 100
 
 
 @dataclass(frozen=True)

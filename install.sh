@@ -7,9 +7,10 @@ usage() {
   cat <<'HELP'
 Usage: install.sh [--compare|--single|--help]
 Debian 12+ / Ubuntu 24.04+, with systemd and Python 3.11+.
-New installs run the 0.15 / 0.20 / 0.25 paper comparison by default.
+New installs run the 0.5% / 1% / 2% paper comparison by default.
 The comparison includes a localhost dashboard on port 9876, accessed over SSH.
 Repeating the command upgrades code and preserves mode, settings and data.
+Original 0.15/0.20/0.25 experiments migrate to percentages with a backup and new ledgers.
 Unchanged dependencies, validated code and running services are reused.
   --compare  Start the three-grid comparison (also switches existing installs).
   --single   Start one grid using config.json.
@@ -136,7 +137,7 @@ import json, sys
 from pathlib import Path
 data = json.loads(Path(sys.argv[1]).read_text())
 data['base_config'] = '/etc/variational-grid/config.json'
-data['output_dir'] = '/var/lib/variational-grid/comparison-015-020-025'
+data['output_dir'] = '/var/lib/variational-grid/comparison-pct-05-1-2'
 Path(sys.argv[2]).write_text(json.dumps(data, indent=2) + '\n')
 PY
   chmod 644 "$conf/experiments.json"
@@ -170,6 +171,18 @@ if ! (cd "$release" && runuser -u "$account" -- python3 -m variational_grid chec
 fi
 # Always validate configuration and the session above. Neither requires a restart
 # when unchanged; refreshed session files are already reloaded by the simulator.
+if [[ $mode == compare ]]; then
+  (cd "$release" && python3 - "$conf/experiments.json" <<'PY'
+import sys
+from variational_grid.migration import upgrade_experiment
+backup = upgrade_experiment(sys.argv[1])
+if backup:
+    print(f'Updated grid steps to 0.5% / 1% / 2%; old settings: {backup}; old ledgers preserved.')
+else:
+    print('Experiment settings unchanged; skipping migration.')
+PY
+  )
+fi
 settings_key=$({
   printf '%s\n' "$mode"
   sha256sum "$conf/config.json"

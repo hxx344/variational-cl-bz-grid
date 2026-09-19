@@ -38,7 +38,7 @@ def init_session(args):
     config_path = Path(args.config)
     if not config_path.exists():
         config_path.parent.mkdir(parents=True, exist_ok=True)
-        config_path.write_text(json.dumps(asdict(Config()), indent=2) + "\n", encoding="utf-8")
+        config_path.write_text(json.dumps(asdict(Config(grid_step_percent="1")), indent=2) + "\n", encoding="utf-8")
     config = configuration(config_path)
     if args.curl_file:
         try:
