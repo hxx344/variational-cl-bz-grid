@@ -106,6 +106,14 @@ class Config:
             return dec(self.grid_step_usdc_per_barrel)
         return abs(dec(center)) * dec(self.grid_step_percent) / 100
 
+    def grid_geometry(self, center):
+        center = dec(center)
+        distance = self.grid_step(center) * self.max_levels
+        percent = dec(self.grid_step_percent) * self.max_levels if self.grid_step_percent is not None else None
+        return {"grid_range_percent": str(percent) if percent is not None else None,
+                "grid_span_percent": str(2 * percent) if percent is not None else None,
+                "grid_lower": str(center - distance), "grid_upper": str(center + distance)}
+
 
 @dataclass(frozen=True)
 class Quote:

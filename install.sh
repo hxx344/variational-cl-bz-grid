@@ -8,9 +8,10 @@ usage() {
 Usage: install.sh [--compare|--single|--help]
 Debian 12+ / Ubuntu 24.04+, with systemd and Python 3.11+.
 New installs run the 0.5% / 1% / 2% paper comparison by default.
+Each direction spans 30% of the center: 60 / 30 / 15 levels respectively.
 The comparison includes a localhost dashboard on port 9876, accessed over SSH.
 Repeating the command upgrades code and preserves mode, settings and data.
-Original 0.15/0.20/0.25 experiments migrate to percentages with a backup and new ledgers.
+Earlier default experiments migrate to +/-30% with a backup and new ledgers.
 Unchanged dependencies, validated code and running services are reused.
   --compare  Start the three-grid comparison (also switches existing installs).
   --single   Start one grid using config.json.
@@ -137,7 +138,7 @@ import json, sys
 from pathlib import Path
 data = json.loads(Path(sys.argv[1]).read_text())
 data['base_config'] = '/etc/variational-grid/config.json'
-data['output_dir'] = '/var/lib/variational-grid/comparison-pct-05-1-2'
+data['output_dir'] = '/var/lib/variational-grid/comparison-pct-05-1-2-range30'
 Path(sys.argv[2]).write_text(json.dumps(data, indent=2) + '\n')
 PY
   chmod 644 "$conf/experiments.json"
@@ -177,7 +178,7 @@ import sys
 from variational_grid.migration import upgrade_experiment
 backup = upgrade_experiment(sys.argv[1])
 if backup:
-    print(f'Updated grid steps to 0.5% / 1% / 2%; old settings: {backup}; old ledgers preserved.')
+    print(f'Updated grid steps to 0.5% / 1% / 2%, each direction 30% (60/30/15 levels); old settings: {backup}; old ledgers preserved.')
 else:
     print('Experiment settings unchanged; skipping migration.')
 PY

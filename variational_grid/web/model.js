@@ -6,6 +6,7 @@
   const signed = (v, digits = 4) => finite(v) ? (Number(v) > 0 ? '+' : '') + number(v, digits) : '—';
   const tone = v => !finite(v) || Number(v) === 0 ? 'neutral' : Number(v) > 0 ? 'gain' : 'loss';
   const gridLabel = row => row?.grid_step_percent != null ? `间距 ${Number(row.grid_step_percent)}%` : `间距 ${number(row?.grid_step, 2)} USDC/桶`;
+  const rangeLabel = row => finite(row?.grid_range_percent) ? `上下各 ${Number(row.grid_range_percent)}% · 总跨度 ${Number(row.grid_span_percent)}%` : `每侧 ${row?.max_levels ?? '—'} 层`;
   const escape = v => String(v ?? '').replace(/[&<>"']/g, x => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[x]));
   function date(ts, short = false, year = false) {
     if (!finite(ts)) return '—';
@@ -40,7 +41,7 @@
       return '"' + text.replace(/"/g, '""') + '"';
     }).join(',')).join('\r\n');
   }
-  const model = { colors, finite, number, signed, tone, gridLabel, escape, date, state, domain, path, csv };
+  const model = { colors, finite, number, signed, tone, gridLabel, rangeLabel, escape, date, state, domain, path, csv };
   if (typeof module !== 'undefined' && module.exports) module.exports = model;
   else root.GridModel = model;
 })(typeof window !== 'undefined' ? window : globalThis);

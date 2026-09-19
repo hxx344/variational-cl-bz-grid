@@ -131,6 +131,7 @@ class Engine:
                 "cl_mark": str(cl.mark), "bz_mark": str(bz.mark), "deviation": str(deviation),
                 "grid_step": str(step), "grid_step_percent": self.config.grid_step_percent,
                 "grid_step_basis": "center_7d_absolute" if self.config.grid_step_percent is not None else "absolute",
+                **self.config.grid_geometry(center),
                 "equity_usdc": str(equity), "cash_usdc": self.store.get("cash"), "realized_pnl_usdc": str(realized),
                 "total_pnl_usdc": str(equity - dec(self.config.paper_balance_usdc)), "fees_usdc": str(fees),
                 "pnl_basis": "before_funding", "open_pairs": len(lots), "cl_barrels": str(-position_bz), "bz_barrels": str(position_bz),

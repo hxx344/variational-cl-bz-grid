@@ -100,6 +100,7 @@ def read_dashboard(experiment, window="24h"):
         row.update(paper_leverage=config.paper_leverage, max_margin_fraction=config.max_margin_fraction,
                    max_holding_hours=config.max_holding_hours, grid_step_percent=config.grid_step_percent,
                    grid_step=str(config.grid_step(frame.center)))
+        row.update(config.grid_geometry(frame.center))
         # Value with the economics recorded in the ledger, never silently with edited config.
         with closing(read_db(config.state_file)) as db:
             db.row_factory = sqlite3.Row

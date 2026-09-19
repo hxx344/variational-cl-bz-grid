@@ -1,9 +1,9 @@
 {
   "base_config": "config.local.json",
-  "output_dir": "data/comparison-pct-05-1-2",
+  "output_dir": "data/comparison-pct-05-1-2-range30",
   "scenarios": [
-    {"name": "step-0.5pct", "overrides": {"grid_step_percent": "0.5"}},
-    {"name": "step-1pct", "overrides": {"grid_step_percent": "1"}},
-    {"name": "step-2pct", "overrides": {"grid_step_percent": "2"}}
+    {"name": "step-0.5pct", "overrides": {"grid_step_percent": "0.5", "max_levels": 60}},
+    {"name": "step-1pct", "overrides": {"grid_step_percent": "1", "max_levels": 30}},
+    {"name": "step-2pct", "overrides": {"grid_step_percent": "2", "max_levels": 15}}
   ]
 }

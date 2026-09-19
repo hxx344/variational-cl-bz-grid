@@ -235,6 +235,7 @@ class Cohort:
             wins = sum(dec(self.stores[name].db.execute("SELECT net_pnl FROM lots WHERE id=?", (a["lot_id"],)).fetchone()[0]) > 0 for a in closes)
             rows.append({**snapshot, "name": name, "grid_step": str(config.grid_step(frame.center)),
                          "grid_step_percent": config.grid_step_percent,
+                         **config.grid_geometry(frame.center),
                          "quantity_barrels": config.quantity_barrels, "initial_balance_usdc": config.paper_balance_usdc,
                          "max_levels": config.max_levels, "fee_bps": config.fee_bps_per_leg, "slippage_bps": config.slippage_bps_per_leg,
                          "return_fraction": str(dec(snapshot["total_pnl_usdc"]) / dec(config.paper_balance_usdc)),

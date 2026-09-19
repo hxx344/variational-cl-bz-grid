@@ -135,6 +135,11 @@ class PercentageVolumeTests(unittest.TestCase):
         with Cohort(experiment) as cohort:
             rows = cohort.ingest(Frame(ts, ts, D(4), {"1": quotes("4.06", ts)}))["scenarios"]
             self.assertEqual([r["grid_step_percent"] for r in rows], ["0.5", "1", "2"])
+            self.assertEqual([r["max_levels"] for r in rows], [60, 30, 15])
+            for row in rows:
+                self.assertEqual(D(row["grid_range_percent"]), D(30))
+                self.assertEqual(D(row["grid_span_percent"]), D(60))
+                self.assertEqual((D(row["grid_lower"]), D(row["grid_upper"])), (D("2.8"), D("5.2")))
             self.assertEqual([r["volume_barrels"] for r in rows], ["2", "2", "0"])
             self.assertEqual([r["fill_count"] for r in rows], [2, 2, 0])
             dashboard = read_dashboard(experiment)
@@ -167,16 +172,17 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(backup.read_bytes(), self.original)
         self.assertEqual((self.old / "preserve-me").read_bytes(), b"old ledger")
         experiment = Experiment.load(self.path)
-        self.assertEqual(experiment.output.name, "comparison-pct-05-1-2")
+        self.assertEqual(experiment.output.name, "comparison-pct-05-1-2-range30")
         self.assertEqual([c.grid_step_percent for c in experiment.scenarios.values()], ["0.5", "1", "2"])
-        self.assertTrue(all(c.quantity_barrels == "2" and c.max_levels == 3 for c in experiment.scenarios.values()))
+        self.assertTrue(all(c.quantity_barrels == "2" for c in experiment.scenarios.values()))
+        self.assertEqual([c.max_levels for c in experiment.scenarios.values()], [60, 30, 15])
         after = self.path.read_bytes(), self.path.stat().st_mtime_ns
         self.assertIsNone(upgrade_experiment(self.path))
         self.assertEqual((self.path.read_bytes(), self.path.stat().st_mtime_ns), after)
         self.assertFalse(list(self.root.glob(".experiment-upgrade-*")))
 
     def test_migration_conflict_leaves_original_config_and_data_untouched(self):
-        dest = self.root / "comparison-pct-05-1-2"
+        dest = self.root / "comparison-pct-05-1-2-range30"
         dest.mkdir()
         (dest / "keep").write_bytes(b"existing experiment")
         with self.assertRaises(GridError):
@@ -190,3 +196,89 @@ class MigrationTests(unittest.TestCase):
         original = self.path.read_bytes()
         self.assertIsNone(upgrade_experiment(self.path))
         self.assertEqual(self.path.read_bytes(), original)
+
+    def test_previous_percentage_experiment_is_backed_up_and_migrated_once(self):
+        self.spec['output_dir'] = 'comparison-pct-05-1-2'
+        self.spec['scenarios'] = [{'name': f'step-{p}pct', 'overrides': {'grid_step_percent': p, 'max_levels': 8}}
+                                  for p in ('0.5', '1', '2')]
+        self.path.write_text(json.dumps(self.spec))
+        original = self.path.read_bytes()
+        backup = upgrade_experiment(self.path)
+        self.assertEqual(backup.name, 'experiments.before-range30.json')
+        self.assertEqual(backup.read_bytes(), original)
+        configs = Experiment.load(self.path).scenarios.values()
+        self.assertEqual([c.max_levels for c in configs], [60, 30, 15])
+        upgraded = json.loads(self.path.read_text())
+        upgraded['scenarios'][0]['overrides']['max_levels'] = 40
+        self.path.write_text(json.dumps(upgraded))
+        edited = self.path.read_bytes()
+        self.assertIsNone(upgrade_experiment(self.path))
+        self.assertEqual(self.path.read_bytes(), edited)
+
+    def test_existing_target_geometry_does_not_reset_ledger(self):
+        self.spec['scenarios'] = [{'name': f'step-{p}pct', 'overrides': {'grid_step_percent': p, 'max_levels': n}}
+                                  for p, n in (('0.5', 60), ('1', 30), ('2', 15))]
+        self.path.write_text(json.dumps(self.spec))
+        original = self.path.read_bytes()
+        self.assertIsNone(upgrade_experiment(self.path))
+        self.assertEqual(self.path.read_bytes(), original)
+
+    def test_percentage_names_with_custom_absolute_spacing_are_preserved(self):
+        self.spec['scenarios'] = [{'name': f'step-{p}pct', 'overrides': {'grid_step_percent': None, 'grid_step_usdc_per_barrel': '0.3'}}
+                                  for p in ('0.5', '1', '2')]
+        self.path.write_text(json.dumps(self.spec))
+        original = self.path.read_bytes()
+        self.assertIsNone(upgrade_experiment(self.path))
+        self.assertEqual(self.path.read_bytes(), original)
+
+
+class RangeTests(unittest.TestCase):
+    def test_thirtieth_percent_is_last_level_in_both_directions(self):
+        # Enough paper funds to exercise geometry independently of margin caps.
+        for percent, count in (('0.5', 60), ('1', 30), ('2', 15)):
+            for sign in (-1, 1):
+                with self.subTest(percent=percent, sign=sign):
+                    config = Config(grid_step_percent=percent, max_levels=count,
+                                    slippage_bps_per_leg='0', paper_balance_usdc='100000')
+                    store = Store(':memory:', config)
+                    try:
+                        engine = Engine(config, store)
+                        just_inside = D(4) + sign * D('1.199999')
+                        for i in range(count):
+                            ts = 1000 + i
+                            result = engine.tick(D(4), *quotes(just_inside, ts), ts)
+                        self.assertEqual(result['open_pairs'], count - 1)
+                        outer = D(4) + sign * D('1.2')
+                        ts += 1
+                        result = engine.tick(D(4), *quotes(outer, ts), ts)
+                        self.assertEqual(result['open_pairs'], count)
+                        self.assertEqual(result['actions'][0]['level'], count)
+                        self.assertEqual(result['actions'][0]['direction'], -sign)
+                        ts += 1
+                        beyond = D(4) + sign * D('1.3')
+                        result = engine.tick(D(4), *quotes(beyond, ts), ts)
+                        self.assertEqual(result['actions'], [])
+                        self.assertEqual(max(lot['level'] for lot in store.lots()), count)
+                    finally:
+                        store.close()
+
+    def test_full_range_configuration_still_obeys_margin_limit(self):
+        config = Config(grid_step_percent='0.5', max_levels=60, slippage_bps_per_leg='0')
+        store = Store(':memory:', config)
+        try:
+            engine = Engine(config, store)
+            for i in range(60):
+                ts = 1000 + i
+                result = engine.tick(D(4), *quotes('5.2', ts), ts)
+            self.assertLess(result['open_pairs'], 60)
+            self.assertEqual(result['skip_reason'], 'margin_budget')
+            self.assertLessEqual(D(result['margin_usdc']), D(result['equity_usdc']) * D('.8'))
+        finally:
+            store.close()
+
+    def test_range_geometry_follows_negative_and_zero_centers(self):
+        config = Config(grid_step_percent='1', max_levels=30)
+        for center, bounds in (('4', ('2.8', '5.2')), ('8', ('5.6', '10.4')), ('-4', ('-5.2', '-2.8')), ('0', ('0', '0'))):
+            geometry = config.grid_geometry(center)
+            self.assertEqual((D(geometry['grid_lower']), D(geometry['grid_upper'])), tuple(map(D, bounds)))
+            self.assertEqual(D(geometry['grid_range_percent']), D(30))

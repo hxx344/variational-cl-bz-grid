@@ -1,4 +1,4 @@
-"""Upgrade the original three absolute-step experiments without rewriting any ledger."""
+"""Upgrade known comparison defaults to +/-30% without rewriting any ledger."""
 import json
 import os
 from pathlib import Path
@@ -8,6 +8,7 @@ from .comparison import Experiment
 from .models import GridError, dec
 
 LEGACY = {"step-0.15": ("0.15", "0.5"), "step-0.20": ("0.20", "1"), "step-0.25": ("0.25", "2")}
+PERCENT = {"step-0.5pct": "0.5", "step-1pct": "1", "step-2pct": "2"}
 
 
 def upgrade_experiment(path):
@@ -15,23 +16,36 @@ def upgrade_experiment(path):
     original = path.read_bytes()
     data = json.loads(original.decode("utf-8-sig"))
     rows = data.get("scenarios", [])
-    if len(rows) != 3 or {r.get("name") for r in rows} != set(LEGACY):
+    names = {r.get("name") for r in rows}
+    old_output = Path(data["output_dir"])
+    # This version already applied; preserve subsequent user edits on repeated installs.
+    if old_output.name.endswith("-range30"):
+        return None
+    absolute = names == set(LEGACY)
+    if len(rows) != 3 or not (absolute or names == set(PERCENT)):
         return None
     for row in rows:
         overrides = row.get("overrides", {})
-        if overrides.get("grid_step_percent") is not None or dec(overrides.get("grid_step_usdc_per_barrel", "0")) != dec(LEGACY[row["name"]][0]):
+        if absolute:
+            matches = overrides.get("grid_step_percent") is None and dec(overrides.get("grid_step_usdc_per_barrel", "0")) == dec(LEGACY[row["name"]][0])
+        else:
+            value = overrides.get("grid_step_percent")
+            matches = value is not None and dec(value) == dec(PERCENT[row["name"]])
+        if not matches:
             return None
     previous = Experiment.load(path)
-    # Preserve all sizing/cost settings; only the requested spacing and cohort change.
+    if not absolute and all(dec(c.grid_step_percent) * c.max_levels == 30 for c in previous.scenarios.values()):
+        return None
+    # Keep quantity, capital and costs; change the requested grid geometry only.
     for row in rows:
-        percent = LEGACY[row["name"]][1]
+        percent = LEGACY[row["name"]][1] if absolute else PERCENT[row["name"]]
         row["name"] = f"step-{percent}pct"
-        row["overrides"].pop("grid_step_usdc_per_barrel")
+        row["overrides"].pop("grid_step_usdc_per_barrel", None)
         row["overrides"]["grid_step_percent"] = percent
-    old_output = Path(data["output_dir"])
-    new_name = "comparison-pct-05-1-2" if old_output.name == "comparison-015-020-025" else old_output.name + "-pct-05-1-2"
+        row["overrides"]["max_levels"] = int(dec("30") / dec(percent))
+    new_name = "comparison-pct-05-1-2-range30" if old_output.name in ("comparison-015-020-025", "comparison-pct-05-1-2") else old_output.name + ("-pct-05-1-2-range30" if absolute else "-range30")
     data["output_dir"] = str(old_output.with_name(new_name))
-    backup = path.with_name(path.stem + ".absolute-015-020-025" + path.suffix)
+    backup = path.with_name(path.stem + (".absolute-015-020-025" if absolute else ".before-range30") + path.suffix)
     if backup.exists() and backup.read_bytes() != original:
         raise GridError("Legacy experiment backup already exists with different settings; refusing to overwrite it")
     handle, temporary = tempfile.mkstemp(prefix=".experiment-upgrade-", suffix=".json", dir=path.parent)

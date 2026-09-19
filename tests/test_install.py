@@ -226,6 +226,7 @@ if name == "runuser":
         self.assertEqual((self.app / "current").resolve().name, self.revision)
         experiments = json.loads((self.conf / "experiments.json").read_text())
         self.assertEqual([s["overrides"]["grid_step_percent"] for s in experiments["scenarios"]], ["0.5", "1", "2"])
+        self.assertEqual([s["overrides"]["max_levels"] for s in experiments["scenarios"]], [60, 30, 15])
         config = json.loads((self.conf / "config.json").read_text())
         config["paper_balance_usdc"] = "1500"
         (self.conf / "config.json").write_text(json.dumps(config))
@@ -291,7 +292,25 @@ if name == "runuser":
         self.assertEqual(sentinel.read_bytes(), b'original data')
         updated = json.loads(path.read_text())
         self.assertEqual([s['overrides']['grid_step_percent'] for s in updated['scenarios']], ['0.5', '1', '2'])
-        self.assertEqual(updated['output_dir'], str(self.state / 'comparison-pct-05-1-2'))
+        self.assertEqual(updated['output_dir'], str(self.state / 'comparison-pct-05-1-2-range30'))
+        self.assertEqual([s['overrides']['max_levels'] for s in updated['scenarios']], [60, 30, 15])
+        self.log.write_text('')
+        self.install('--compare')
+        self.assertEqual(self.restarts(), [])
+
+    def test_previous_percentage_install_migrates_to_full_range(self):
+        self.install()
+        path = self.conf / 'experiments.json'
+        spec = json.loads(path.read_text())
+        spec['output_dir'] = str(self.state / 'comparison-pct-05-1-2')
+        for row in spec['scenarios']:
+            row['overrides'].pop('max_levels')
+        path.write_text(json.dumps(spec))
+        original = path.read_bytes()
+        self.install('--compare')
+        self.assertEqual((self.conf / 'experiments.before-range30.json').read_bytes(), original)
+        updated = json.loads(path.read_text())
+        self.assertEqual([s['overrides']['max_levels'] for s in updated['scenarios']], [60, 30, 15])
         self.log.write_text('')
         self.install('--compare')
         self.assertEqual(self.restarts(), [])

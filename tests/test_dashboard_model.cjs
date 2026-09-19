@@ -17,6 +17,10 @@ test('unknown values stay missing and signed losses are explicit', () => {
   assert.equal(M.signed(1.2), '+1.2000');
   assert.equal(M.tone(-1), 'loss');
 });
+test('range labels distinguish one direction from the full span', () => {
+  assert.equal(M.rangeLabel({grid_range_percent:'30.0',grid_span_percent:'60.0'}), '上下各 30% · 总跨度 60%');
+  assert.equal(M.rangeLabel({max_levels:8}), '每侧 8 层');
+});
 test('time is Beijing time, independent of the viewer timezone', () => {
   assert.match(M.date(1735689600), /01.01.*08:00:00/);
   assert.match(M.date(1735689600, false, true), /2025/);
