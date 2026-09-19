@@ -1,6 +1,8 @@
 # CL / BZ 等桶数价差网格（模拟版）
 
-从 Variational Omni 的前端接口读取真实行情，在本地模拟 CL、BZ 等桶数双腿市价成交。以 **BZ − CL 的最近 7 日平均价差**为中枢。无需钱包私钥；使用已经登录的 `vr-token` Cookie 读取行情。
+从 Variational Omni 的前端接口读取真实行情，在本地模拟 CL、BZ 等桶数双腿市价成交。以 **BZ − CL 的最近 7 日平均价差**为中枢。无需钱包私钥；当前模拟使用已经登录的 `vr-token` Cookie 请求与每腿桶数相匹配的指示性买卖报价。
+
+**仅获取公开行情不需要令牌。** 2026-09-19 无 Cookie 实测：前端 K 线、合约元数据以及官方公开 `GET /metadata/stats` 均返回 200，CL/BZ 的 `POST /api/quotes/indicative` 返回 403；同一报价接口使用现有会话成功。当前程序选择后一种按数量报价，并在启动时检查登录状态，所以仍需令牌。官方公开统计也有买卖价，但按固定名义金额分档，文档允许最长 600 秒缓存；不能直接当成按当前每腿桶数取得的实时成交报价。当前未实现公开统计报价模拟模式。
 
 程序只支持 `paper`。网络出口只允许会话检查、合约元数据、K 线、指示性报价四种接口，**没有真实下单、撤单、转账或提款功能**。资金与仓位完全属于本地模拟账本。
 
@@ -21,6 +23,7 @@ python -m variational_grid run
 python -m variational_grid run --once
 python -m variational_grid run --iterations 3
 python -m variational_grid status
+python -m variational_grid check-session
 python -m variational_grid export --output output/fills.csv
 ```
 
@@ -140,6 +143,8 @@ sudo bash install.sh --compare
 - 停止：`sudo systemctl stop variational-grid`
 - 修改配置后：`sudo systemctl restart variational-grid`
 - 刷新会话：重复执行安装命令；有效会话保留，已过期会话重新提示输入。
+
+首次安装出现 `Cannot read session; run init-session first` 表示服务器尚未保存会话，接下来会提示隐藏输入令牌。它不表示交易所拒绝公开行情。新版使用 `check-session` 输出简短状态；旧版的长堆栈及 Ubuntu `apport` 的 `/-c` 报错是安装预检查未捕获异常引起的，可以 Ctrl+C 后重新执行上方安装命令更新。
 
 安装流程有 Ubuntu 隔离测试：使用临时目录和本地 Git 源验证首次安装、重复升级、模式切换、配置与数据保留，以及新版本测试失败时保留旧版本。测试替代系统服务管理和远端会话检查，不访问真实账户；尚未在你的服务器上部署。
 

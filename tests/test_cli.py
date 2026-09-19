@@ -61,6 +61,29 @@ class CliTests(unittest.TestCase):
         self.assertEqual(code, 2)
         self.assertNotIn("PRIVATE-SECRET", output.getvalue())
 
+    def test_session_check_missing_file_is_a_clean_error_without_network(self):
+        with patch("urllib.request.OpenerDirector.open", side_effect=AssertionError("Missing session must fail before network")), redirect_stdout(io.StringIO()) as output:
+            code = main(["check-session", "--config", str(self.config)])
+        self.assertEqual(code, 2)
+        result = json.loads(output.getvalue())
+        self.assertEqual(result["status"], "error")
+        self.assertIn("Cannot read session", result["reason"])
+        self.assertNotIn("Traceback", output.getvalue())
+
+    def test_session_check_success_reports_only_verified_status(self):
+        verified = {"authenticated": True, "expires_utc": "2030-01-01T00:00:00+00:00"}
+        with patch("variational_grid.cli.Client.check_session", return_value=verified), redirect_stdout(io.StringIO()) as output:
+            code = main(["check-session", "--config", str(self.config)])
+        self.assertEqual(code, 0)
+        self.assertEqual(json.loads(output.getvalue()), verified)
+
+    def test_session_check_unexpected_failure_does_not_escape_to_excepthook(self):
+        with patch("variational_grid.cli.Client.check_session", side_effect=RuntimeError("PRIVATE-SECRET")), redirect_stdout(io.StringIO()) as output:
+            code = main(["check-session", "--config", str(self.config)])
+        self.assertEqual(code, 2)
+        self.assertNotIn("PRIVATE-SECRET", output.getvalue())
+        self.assertNotIn("Traceback", output.getvalue())
+
     def test_export_refuses_overwriting_session_config_or_state(self):
         config = configuration(self.config)
         for path in (self.config, config.session_file, config.state_file):

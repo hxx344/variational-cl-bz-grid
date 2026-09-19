@@ -55,6 +55,11 @@ def init_session(args):
     emit(Client(config.session_file).check_session())
 
 
+def check_session(args):
+    config = configuration(args.config)
+    emit(Client(config.session_file).check_session())
+
+
 def run(args):
     config = configuration(args.config)
     client = Client(config.session_file)
@@ -176,7 +181,7 @@ def demo(args):
 def main(argv=None):
     parser = argparse.ArgumentParser(description="Variational CL/BZ equal-barrel grid — PAPER ONLY")
     commands = parser.add_subparsers(dest="command", required=True)
-    for name, function in (("init-session", init_session), ("run", run), ("status", status), ("export", export)):
+    for name, function in (("init-session", init_session), ("check-session", check_session), ("run", run), ("status", status), ("export", export)):
         sub = commands.add_parser(name)
         sub.add_argument("--config", default="config.local.json")
         sub.set_defaults(function=function)

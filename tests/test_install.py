@@ -49,13 +49,14 @@ class InstallTests(unittest.TestCase):
             installer = installer.replace(original, str(replacement))
         # CI need not be root. All absolute install targets above are in this temp dir.
         installer = installer.replace("if [[ ${EUID} -ne 0 ]]; then", "if false; then")
+        installer = installer.replace("</dev/tty", "</dev/null")  # Interactive import is stubbed below.
         self.script = self.root / "install.sh"
         self.script.write_text(installer)
         self.bin = self.root / "bin"
         self.bin.mkdir()
         self.log = self.root / "commands.jsonl"
         shim = f'''#!{sys.executable}
-import json, os, sys
+import json, os, subprocess, sys
 from pathlib import Path
 name = Path(sys.argv[0]).name
 args = sys.argv[1:]
@@ -70,8 +71,15 @@ if name == "install":
         else:
             filtered.append(args[i]); i += 1
     os.execv("/usr/bin/install", ["install", *filtered])
-if name == "runuser" and ("-c" not in args or not args[-1].endswith(".check_session()")):
-    raise SystemExit("Unexpected credential import in installer test")
+if name == "runuser":
+    if args[3:7] != ["python3", "-m", "variational_grid", "check-session"]:
+        if args[3:7] == ["python3", "-m", "variational_grid", "init-session"] and os.environ.get("GRID_INSTALL_TEST_MISSING_SESSION"):
+            print("Fixture: hidden session import completed")
+        else:
+            raise SystemExit("Unexpected credential operation in installer test")
+    elif os.environ.get("GRID_INSTALL_TEST_MISSING_SESSION"):
+        # Execute the actual missing-file error path, which cannot contact the API.
+        raise SystemExit(subprocess.call(args[3:]))
 '''
         for name in ("apt-get", "id", "useradd", "install", "runuser", "systemctl"):
             path = self.bin / name
@@ -151,6 +159,16 @@ if name == "runuser" and ("-c" not in args or not args[-1].endswith(".check_sess
         self.install("--compare", "--single", expected=1)
         self.assertFalse(self.log.exists())
         self.assertFalse(self.app.exists())
+
+    def test_missing_session_prompts_cleanly_then_completes_installation(self):
+        self.env["GRID_INSTALL_TEST_MISSING_SESSION"] = "1"
+        result = self.install()
+        self.assertIn("Cannot read session", result.stdout)
+        self.assertIn("public candles and statistics do not require one", result.stdout)
+        self.assertIn("Fixture: hidden session import completed", result.stdout)
+        self.assertNotIn("Traceback", result.stdout + result.stderr)
+        self.assertNotIn("sys.excepthook", result.stdout + result.stderr)
+        self.assertIn("compare --experiments", self.unit.read_text())
 
 
 if __name__ == "__main__":

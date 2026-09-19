@@ -125,7 +125,8 @@ for value in (config.session_file, config.state_file):
         raise SystemExit('Service session_file and state_file must stay inside /var/lib/variational-grid')
 PY
 )
-if ! (cd "$release" && runuser -u "$account" -- python3 -c 'from variational_grid.client import Client; from variational_grid.cli import configuration; Client(configuration("/etc/variational-grid/config.json").session_file).check_session()'); then
+if ! (cd "$release" && runuser -u "$account" -- python3 -m variational_grid check-session --config "$conf/config.json"); then
+  echo 'A valid login session is needed for quantity-specific indicative quotes; public candles and statistics do not require one.'
   echo 'Paste only the vr-token cookie when prompted (input is hidden). No wallet private key is needed.'
   # /dev/tty keeps this interactive even when the installer arrives through curl | bash.
   (cd "$release" && runuser -u "$account" -- python3 -m variational_grid init-session --config "$conf/config.json" </dev/tty)
