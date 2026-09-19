@@ -3,14 +3,27 @@
 set -euo pipefail
 umask 077
 requested_mode=
+usage() {
+  cat <<'HELP'
+Usage: install.sh [--compare|--single|--help]
+Debian 12+ / Ubuntu 24.04+, with systemd and Python 3.11+.
+New installs run the 0.15 / 0.20 / 0.25 paper comparison by default.
+Repeating the command upgrades code and preserves mode, settings and data.
+  --compare  Start the three-grid comparison (also switches existing installs).
+  --single   Start one grid using config.json.
+  --help     Show this help without installing anything.
+The first install asks for vr-token with hidden input; no wallet key is needed.
+HELP
+}
 if [[ $# -gt 1 ]]; then
-  echo 'Usage: install.sh [--compare|--single]' >&2; exit 1
+  usage >&2; exit 1
 fi
 case ${1:-} in
   --compare) requested_mode=compare ;;
   --single) requested_mode=run ;;
+  --help|-h) usage; exit 0 ;;
   '') ;;
-  *) echo 'Usage: install.sh [--compare|--single]' >&2; exit 1 ;;
+  *) usage >&2; exit 1 ;;
 esac
 
 if [[ ${EUID} -ne 0 ]]; then
@@ -27,6 +40,7 @@ if ! command -v apt-get >/dev/null; then
 fi
 
 export DEBIAN_FRONTEND=noninteractive
+export PYTHONDONTWRITEBYTECODE=1
 apt-get update -qq
 apt-get install -y -qq python3 git ca-certificates
 python3 -c 'import sys; assert sys.version_info >= (3, 11), "Python 3.11+ required (Debian 12+ / Ubuntu 24.04+)"'
@@ -36,7 +50,7 @@ conf=/etc/variational-grid
 state=/var/lib/variational-grid
 repository=https://github.com/hxx344/variational-cl-bz-grid.git
 account=variational-grid
-mode=${requested_mode:-$(cat "$conf/mode" 2>/dev/null || echo run)}
+mode=${requested_mode:-$(cat "$conf/mode" 2>/dev/null || echo compare)}
 [[ $mode == run || $mode == compare ]] || { echo 'Invalid saved service mode.' >&2; exit 1; }
 
 id "$account" >/dev/null 2>&1 || useradd --system --home-dir "$state" --shell /usr/sbin/nologin "$account"
@@ -51,12 +65,23 @@ fi
 revision=$(git -C "$app/source" rev-parse 'origin/main^{commit}')
 [[ $revision =~ ^[a-f0-9]{40}$ ]] || exit 1
 release="$app/releases/$revision"
+staging=
+cleanup() {
+  if [[ -n $staging && $staging == "$app/releases/.staging."* && -d $staging ]]; then
+    rm -rf -- "$staging"
+  fi
+}
+trap cleanup EXIT
 if [[ ! -d "$release" ]]; then
-  install -d -m 755 "$release"
-  git -C "$app/source" archive "$revision" | tar -x -C "$release"
-  chmod -R u=rwX,go=rX "$release"
+  staging=$(mktemp -d "$app/releases/.staging.XXXXXX")
+  git -C "$app/source" archive "$revision" | tar -x -C "$staging"
+  (cd "$staging" && python3 -m unittest discover -s tests -v)
+  chmod -R u=rwX,go=rX "$staging"
+  mv -- "$staging" "$release"
+  staging=
+else
+  (cd "$release" && python3 -m unittest discover -s tests -v)
 fi
-(cd "$release" && python3 -m unittest discover -s tests -v)
 if [[ ! -f "$conf/config.json" ]]; then
   python3 - "$release/config.example.json" "$conf/config.json" <<'PY'
 import json, sys
@@ -143,4 +168,12 @@ systemctl enable variational-grid.service
 systemctl restart variational-grid.service
 systemctl --no-pager --full status variational-grid.service
 echo 'Paper simulation started. Settings and ledger are preserved on repeat installation.'
+printf 'Service mode: %s\n' "$mode"
+echo 'Settings: /etc/variational-grid/config.json'
+if [[ $mode == compare ]]; then
+  echo 'Experiments: /etc/variational-grid/experiments.json'
+  echo 'Report: <output_dir from experiments.json>/public/index.html'
+fi
 echo 'Logs: journalctl -u variational-grid -f'
+echo 'Stop: sudo systemctl stop variational-grid'
+echo 'Restart: sudo systemctl restart variational-grid'

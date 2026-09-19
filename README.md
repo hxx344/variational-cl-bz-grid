@@ -121,18 +121,18 @@ python -m http.server 0 --bind 127.0.0.1 --directory data/comparison-015-020-025
 适用于 Debian 12+ / Ubuntu 24.04+、systemd：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/hxx344/variational-cl-bz-grid/main/install.sh | sudo bash
-```
-
-自动安装 Python 与 Git、下载代码、运行测试、创建独立服务账户和 systemd 服务并启动模拟。首次安装提示隐藏输入 `vr-token`。重复执行同一命令升级，保留配置、会话与账本；旧代码版本保留在 releases 中。
-
-直接部署本次三组对照，或将已有服务切换为对照模式：
-
-```bash
 curl -fsSL https://raw.githubusercontent.com/hxx344/variational-cl-bz-grid/main/install.sh | sudo bash -s -- --compare
 ```
 
-实验配置放在 `/etc/variational-grid/experiments.json`，结果放在 `/var/lib/variational-grid/comparison-015-020-025/`。重复升级保留所选模式和已有实验配置；用 `--single` 切回原单组模式，各自账本保留。对照服务可以用下方 `systemctl stop` 停止；仅部署模拟进程，不自动暴露网页端口。
+这一条命令会自动安装 Python 与 Git、下载并验证代码、创建独立服务账户、配置开机启动和失败后自动重启，并启动 **0.15 / 0.20 / 0.25 三组对照模拟**。首次安装只需按提示粘贴 `vr-token`（隐藏输入），不需要钱包私钥。重复执行同一命令升级，保留配置、会话与账本；旧代码版本保留在 releases 中。新版本测试失败时不会切换正在运行的代码，未完成的解压目录自动清理。
+
+已经下载仓库时，也可直接运行：
+
+```bash
+sudo bash install.sh --compare
+```
+
+首次安装不带参数也默认运行三组；已有安装不带参数会保留所选模式，`--compare` 明确切换为三组。实验配置放在 `/etc/variational-grid/experiments.json`，结果放在 `/var/lib/variational-grid/comparison-015-020-025/`。已有实验配置不会被覆盖；用 `--single` 切回原单组模式，各自账本保留。仅部署模拟进程，不自动开放公网网页端口。
 
 - 参数：`/etc/variational-grid/config.json`
 - 会话、账本：`/var/lib/variational-grid/`；可改文件名，但服务配置要求路径保持在该目录内。
@@ -141,7 +141,7 @@ curl -fsSL https://raw.githubusercontent.com/hxx344/variational-cl-bz-grid/main/
 - 修改配置后：`sudo systemctl restart variational-grid`
 - 刷新会话：重复执行安装命令；有效会话保留，已过期会话重新提示输入。
 
-没有在你的 Linux 服务器上执行安装；安装脚本的静态检查和本地单元测试不等同于服务器部署验收。
+安装流程有 Ubuntu 隔离测试：使用临时目录和本地 Git 源验证首次安装、重复升级、模式切换、配置与数据保留，以及新版本测试失败时保留旧版本。测试替代系统服务管理和远端会话检查，不访问真实账户；尚未在你的服务器上部署。
 
 ## 接口依据
 
