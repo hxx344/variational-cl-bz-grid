@@ -37,6 +37,8 @@ class InstallTests(unittest.TestCase):
         self.app = self.root / "opt/variational-grid"
         self.conf = self.root / "etc/variational-grid"
         self.state = self.root / "var/lib/variational-grid"
+        self.proc = self.root / "proc"
+        self.proc.mkdir()
         units = self.root / "etc/systemd/system"
         units.mkdir(parents=True)
         self.unit = units / "variational-grid.service"
@@ -53,6 +55,7 @@ class InstallTests(unittest.TestCase):
         # CI need not be root. All absolute install targets above are in this temp dir.
         installer = installer.replace("if [[ ${EUID} -ne 0 ]]; then", "if false; then")
         installer = installer.replace("</dev/tty", "</dev/null")  # Interactive import is stubbed below.
+        installer = installer.replace("Path('/proc')", f"Path({str(self.proc)!r})")
         self.script = self.root / "install.sh"
         self.script.write_text(installer)
         self.bin = self.root / "bin"
@@ -70,6 +73,14 @@ with open(os.environ["GRID_INSTALL_TEST_LOG"], "a") as log:
     log.write(json.dumps([name, *args]) + "\\n")
 if name == "git":
     os.execv({real_git!r}, ["git", *args])
+if name == "df":
+    kind = os.environ.get("GRID_INSTALL_TEST_LOW_STORAGE")
+    if kind and args[0] in ("-Pk", "-Pi"):
+        available = 0 if (kind == "bytes") == (args[0] == "-Pk") else 100000000
+        print("Filesystem Blocks Used Available Use% Mounted")
+        print(f"fixture 100000000 0 {{available}} 0% /")
+        raise SystemExit(0)
+    os.execv("/usr/bin/df", ["df", *args])
 if name == "dpkg-query":
     if args[-1] in os.environ.get("GRID_INSTALL_TEST_MISSING_PACKAGES", "").split(","):
         raise SystemExit(1)
@@ -79,12 +90,24 @@ if name == "systemctl":
     state = json.loads(path.read_text()) if path.exists() else {{}}
     service = args[-1]
     row = state.setdefault(service, {{"active": False, "enabled": False}})
+    if args[0] == "show":
+        if os.environ.get("GRID_INSTALL_TEST_FAIL_INSPECTION"):
+            raise SystemExit(1)
+        print("LoadState=loaded")
+        print(f"MainPID={{row.get('pid', 0) if row['active'] else 0}}")
+        raise SystemExit(0)
     if args[0] == "is-active": raise SystemExit(0 if row["active"] else 3)
     if args[0] == "is-enabled": raise SystemExit(0 if row["enabled"] else 1)
     if args[0] == "daemon-reload" and os.environ.get("GRID_INSTALL_TEST_FAIL_RELOAD"):
         raise SystemExit(1)
     if args[0] == "enable": row["enabled"] = True
-    if args[0] == "restart": row["active"] = True
+    if args[0] == "restart":
+        row["active"] = True
+        row["pid"] = 1001 if service == "variational-grid.service" else 1002
+        cwd = Path({str(self.proc)!r}) / str(row["pid"]) / "cwd"
+        cwd.parent.mkdir(exist_ok=True)
+        cwd.unlink(missing_ok=True)
+        cwd.symlink_to((Path({str(self.app)!r}) / "current").resolve(), target_is_directory=True)
     if args[0] == "disable": row.update(active=False, enabled=False)
     path.write_text(json.dumps(state))
 if name == "install":
@@ -106,7 +129,7 @@ if name == "runuser":
         # Execute the actual missing-file error path, which cannot contact the API.
         raise SystemExit(subprocess.call(args[3:]))
 '''
-        for name in ("apt-get", "dpkg-query", "git", "id", "useradd", "install", "runuser", "systemctl"):
+        for name in ("apt-get", "df", "dpkg-query", "git", "id", "useradd", "install", "runuser", "systemctl"):
             path = self.bin / name
             path.write_text(shim)
             path.chmod(0o755)
@@ -271,7 +294,7 @@ if name == "runuser":
         self.assertFalse((self.app / "releases" / failed_revision).exists())
         self.assertFalse(list((self.app / "releases").glob(".staging.*")))
         calls = [json.loads(line) for line in self.log.read_text().splitlines()]
-        self.assertFalse(any(call[0] == "systemctl" for call in calls))
+        self.assertFalse(any(call[0] == "systemctl" and call[1] != "show" for call in calls))
 
     def test_legacy_comparison_upgrade_archives_settings_and_keeps_old_ledgers(self):
         self.install()
@@ -332,6 +355,88 @@ if name == "runuser":
         self.assertNotIn("Traceback", result.stdout + result.stderr)
         self.assertNotIn("sys.excepthook", result.stdout + result.stderr)
         self.assertIn("compare --experiments", self.unit.read_text())
+
+    def test_cleanup_keeps_current_backup_and_older_engine_and_web(self):
+        self.install()
+        engine_revision = self.revision
+        with (self.source / 'variational_grid/web/styles.css').open('a') as file:
+            file.write('\n/* second web */\n')
+        web_revision = self.commit()
+        self.install()
+        revisions = []
+        for number in range(3):
+            (self.source / 'README.md').write_text(f'Documentation {number}')
+            revisions.append(self.commit())
+            self.install()
+        retained = {path.name for path in (self.app / 'releases').iterdir()}
+        self.assertEqual(retained, {engine_revision, web_revision, *revisions[-2:]})
+        unknown = self.app / 'releases' / ('f' * 40)
+        unknown.mkdir()
+        (unknown / 'keep').write_text('user content')
+        stale = self.app / 'releases' / ('e' * 40)
+        stale.mkdir()
+        (stale / '.install-owned').write_text('variational-grid\n')
+        orphan_stamp = self.app / 'validated' / ('f' * 64)
+        orphan_stamp.write_text('unreferenced')
+        before = {path: path.read_bytes() for path in self.conf.iterdir() if path.is_file()}
+        self.log.write_text('')
+        self.install('--cleanup')
+        self.assertEqual(self.restarts(), [])
+        self.assertFalse(any(call[0] in ('apt-get', 'git', 'runuser') for call in self.calls()))
+        self.assertFalse(stale.exists())
+        self.assertFalse(orphan_stamp.exists())
+        self.assertEqual((unknown / 'keep').read_text(), 'user content')
+        for path, content in before.items():
+            self.assertEqual(path.read_bytes(), content)
+        with (self.source / 'variational_grid/engine.py').open('a') as file:
+            file.write('\n# new runtime\n')
+        newest = self.commit()
+        self.install()
+        self.assertEqual({path.name for path in (self.app / 'releases').iterdir()},
+                         {newest, revisions[-1], unknown.name})
+
+    def test_low_capacity_or_inodes_stop_before_fetch_validation_or_restart(self):
+        self.install()
+        original_release = (self.app / 'current').resolve()
+        original_validation = self.validation_log.read_bytes()
+        original_config = (self.conf / 'config.json').read_bytes()
+        for kind, message in (('bytes', 'Insufficient disk space'), ('inodes', 'Insufficient inodes')):
+            self.env['GRID_INSTALL_TEST_LOW_STORAGE'] = kind
+            self.log.write_text('')
+            result = self.install(expected=1)
+            self.assertIn(message, result.stderr)
+            self.assertEqual((self.app / 'current').resolve(), original_release)
+            self.assertEqual(self.validation_log.read_bytes(), original_validation)
+            self.assertEqual((self.conf / 'config.json').read_bytes(), original_config)
+            self.assertEqual(self.restarts(), [])
+            self.assertFalse(any(call[0] == 'git' and any(arg in ('fetch', 'clone', 'archive')
+                                                        for arg in call[1:]) for call in self.calls()))
+
+    def test_service_inspection_failure_preserves_all_releases(self):
+        self.install()
+        stale = self.app / 'releases' / ('e' * 40)
+        stale.mkdir()
+        (stale / '.install-owned').write_text('variational-grid\n')
+        self.env['GRID_INSTALL_TEST_FAIL_INSPECTION'] = '1'
+        self.log.write_text('')
+        self.install('--cleanup', expected=1)
+        self.assertTrue(stale.is_dir())
+        self.assertEqual((self.app / 'current').resolve().name, self.revision)
+        self.assertEqual(self.restarts(), [])
+
+    def test_configuration_failure_discards_prepared_unactivated_release(self):
+        self.install()
+        config_path = self.conf / 'config.json'
+        config = json.loads(config_path.read_text())
+        config['poll_seconds'] = -1
+        config_path.write_text(json.dumps(config))
+        (self.source / 'README.md').write_text('New documentation')
+        revision = self.commit()
+        self.log.write_text('')
+        self.install(expected=1)
+        self.assertEqual((self.app / 'current').resolve().name, self.revision)
+        self.assertFalse((self.app / 'releases' / revision).exists())
+        self.assertEqual(self.restarts(), [])
 
 
 if __name__ == "__main__":
