@@ -14,6 +14,7 @@ The comparison includes a localhost dashboard on port 9876, accessed over SSH.
 Repeating the command upgrades code and preserves mode, settings and data.
 Earlier default experiments migrate to +/-30% with a backup and new ledgers.
 Earlier seven-day centers migrate to three days with separate preserved ledgers.
+Deployments use a cached offline preflight; full regression tests run in CI.
 Unchanged dependencies, validated code and running services are reused.
   --compare  Start the three-grid comparison (also switches existing installs).
   --inventory  Start the five-scenario inventory comparison with its own ledgers.
@@ -364,18 +365,19 @@ else
 fi
 [[ $revision =~ ^[a-f0-9]{40}$ ]] || exit 1
 release="$app/releases/$revision"
-# Tests depend on their source, deployment logic, examples and Python runtime.
-# Docs-only revisions can reuse a successful result; failed runs never write it.
+# Version the quick check separately from the legacy full-test cache.
+# Docs/tests-only revisions reuse it; failed checks never write a success stamp.
 validation_key=$({
-  python3 --version
-  git -C "$app/source" ls-tree -r "$revision" -- variational_grid tests install.sh config.example.json experiments.example.json inventory.example.json qqq-hedge.example.json pyproject.toml
+  printf '%s\n' 'quick-preflight-v1'
+  python3 -c 'import sys, sqlite3; print(sys.version, sys.implementation.name, sys.implementation.cache_tag, sys.executable, sqlite3.sqlite_version)'
+  git -C "$app/source" ls-tree -r "$revision" -- variational_grid deploy_check.py install.sh config.example.json experiments.example.json inventory.example.json qqq-hedge.example.json pyproject.toml
 } | sha256sum | cut -d ' ' -f1)
 install -d -m 755 "$app/validated"
 validate_release() {
   if [[ $(cat "$app/validated/$validation_key" 2>/dev/null || true) == "$validation_key" ]]; then
-    echo 'Matching code/tests/Python already validated; skipping full test suite.'
+    echo 'Matching release/runtime already checked; skipping quick preflight. Full tests run in CI.'
   else
-    (cd "$1" && python3 -m unittest discover -s tests -v)
+    (cd "$1" && python3 -B deploy_check.py)
     printf '%s\n' "$validation_key" >"$app/validated/$validation_key"
   fi
   printf '%s\n' "$validation_key" >"$1/.install-validation"

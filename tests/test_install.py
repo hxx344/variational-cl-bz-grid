@@ -24,13 +24,13 @@ class InstallTests(unittest.TestCase):
         self.source.mkdir()
         shutil.copytree(self.project / "variational_grid", self.source / "variational_grid", ignore=shutil.ignore_patterns("__pycache__"))
         for name in ("config.example.json", "experiments.example.json", "inventory.example.json",
-                     "qqq-hedge.example.json", "install.sh", "pyproject.toml"):
+                     "qqq-hedge.example.json", "install.sh", "deploy_check.py", "pyproject.toml"):
             shutil.copy(self.project / name, self.source / name)
+        with (self.source / "deploy_check.py").open("a") as check:
+            check.write("\nimport os\nwith Path(os.environ['GRID_INSTALL_TEST_VALIDATION_LOG']).open('a') as log: log.write('validated\\n')\n")
         (self.source / "tests").mkdir()
         (self.source / "tests/test_release.py").write_text(
-            "import os, unittest\nfrom pathlib import Path\nclass ReleaseTest(unittest.TestCase):\n"
-            "    def test_release(self):\n"
-            "        with Path(os.environ['GRID_INSTALL_TEST_VALIDATION_LOG']).open('a') as log: log.write('validated\\n')\n")
+            "raise AssertionError('Deployment must not execute the regression suite')\n")
         self.git("init", "--initial-branch=main")
         self.git("config", "user.name", "Installer fixture")
         self.git("config", "user.email", "installer@example.invalid")
@@ -163,7 +163,7 @@ if name == "runuser":
         validated = self.validation_log.read_bytes()
         self.log.write_text('')
         result = self.install()
-        self.assertIn('skipping full test suite', result.stdout)
+        self.assertIn('skipping quick preflight', result.stdout)
         self.assertEqual(self.validation_log.read_bytes(), validated)
         self.assertFalse(any(call[0] == 'apt-get' for call in self.calls()))
         self.assertFalse(any(call[0] == 'git' and any(arg in ('fetch', 'clone', 'archive') for arg in call[1:]) for call in self.calls()))
@@ -535,6 +535,18 @@ if name == "runuser":
         self.assertEqual(len(self.validation_log.read_text().splitlines()), 2)
         self.assertEqual(self.restarts(), ['variational-grid-web.service'])
 
+    def test_test_only_update_reuses_preflight_without_restarting_services(self):
+        self.install('--qqq-hedge')
+        validated = self.validation_log.read_bytes()
+        (self.source / 'tests/test_release.py').write_text("raise AssertionError('Still never run during deployment')\n")
+        revision = self.commit()
+        self.log.write_text('')
+        result = self.install()
+        self.assertIn('skipping quick preflight', result.stdout)
+        self.assertEqual(self.validation_log.read_bytes(), validated)
+        self.assertEqual((self.app / 'current').resolve().name, revision)
+        self.assertEqual(self.restarts(), [])
+
     def test_runtime_and_configuration_changes_restart_affected_services(self):
         self.install()
         with (self.source / 'variational_grid/engine.py').open('a') as file:
@@ -625,8 +637,8 @@ if name == "runuser":
     def test_failed_release_does_not_switch_or_restart_existing_service(self):
         self.install()
         original_unit = self.unit.read_bytes()
-        (self.source / "tests/test_release.py").write_text(
-            "import unittest\nclass ReleaseTest(unittest.TestCase):\n    def test_release(self): self.fail('injected failure')\n")
+        with (self.source / "variational_grid/engine.py").open('a') as source:
+            source.write('\ndef broken(:\n')
         failed_revision = self.commit()
         self.log.write_text("")
         self.install(expected=1)
