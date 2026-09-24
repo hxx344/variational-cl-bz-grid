@@ -6,10 +6,14 @@
   const percent = (value, digits = 2) => M.finite(value) ? M.number(value, digits) + '%' : '—';
   const dollarHedge = row => M.finite(row?.hedge_threshold_usdc);
   const hedgeLimit = row => dollarHedge(row) ? M.number(row.hedge_threshold_usdc, 0) + ' USDC' : percent(row?.hedge_tolerance_percent, 0);
-  const scalperModel = 'perp_dex_scalper_v1';
-  const isScalper = value => value?.scalper?.model === scalperModel;
+  const isScalperModel = model => ['perp_dex_scalper_v1','perp_dex_scalper_v2'].includes(model);
+  const isScalper = value => isScalperModel(value?.scalper?.model);
+  const distanceFree = value => value?.scalper?.model === 'perp_dex_scalper_v2';
   const seconds = value => M.finite(value) ? Number(value).toLocaleString('en-US', {maximumFractionDigits:1}) + ' 秒' : '—';
-  const label = row => row ? `${isScalper(row) ? '剥头皮' : '网格'} ${percent(row.grid_step_percent, 2)} / 对冲 ${hedgeLimit(row)}` : '未知账户';
+  const profitTarget = row => row?.scalper?.take_profit_percent ?? row?.take_profit_percent ?? row?.grid_step_percent;
+  const label = row => row ? `${isScalper(row) ? '剥头皮' : '网格'} ${distanceFree(row) ? 'TP ' + percent(profitTarget(row),2) : percent(row.grid_step_percent,2)} / 对冲 ${hedgeLimit(row)}` : '未知账户';
+  const strategyTitle = row => distanceFree(row) ? `止盈 ${percent(profitTarget(row),2)}` : `${isScalper(row) ? '间距' : '网格'} ${percent(row?.grid_step_percent,2)}${isScalper(row) ? ' / TP ' + percent(profitTarget(row),2) : ''}`;
+  const entryDistanceRule = value => distanceFree(value) ? '已取消；不按已有批次与当前价格的距离拦截新开仓' : '最小已有 TP ÷ [最优卖价 × (1 + TP%)] > 1 + 间距%；没有已有 TP 时通过';
   function scalperStatus(row) {
     if (!isScalper(row)) return null;
     const s = row.scalper;
@@ -17,7 +21,7 @@
     return {
       phase:phases[s.phase] || '等待开仓状态',
       waiting:s.cooldown_waived === true ? '本轮批次减少，已跳过冷却' : Number(s.active_entries) > 0 ? '开仓单处理中，下次冷却从入场完成起算' : M.finite(s.cooldown_remaining_seconds) ? `采样时冷却剩余 ${seconds(Math.max(0, Number(s.cooldown_remaining_seconds)))}` : '采样时冷却剩余未提供',
-      gate:s.grid_allowed === true ? '价格距离已满足' : s.grid_allowed === false ? '价格距离未满足' : '价格距离未评估',
+      gate:distanceFree(row) ? '新开仓距离门槛已取消' : s.grid_allowed === true ? '价格距离已满足' : s.grid_allowed === false ? '价格距离未满足' : '价格距离未评估',
       orders:`开仓 ${M.number(s.active_entries,0)} / 1 · TP ${M.number(s.active_take_profits,0)} · 占用 ${M.number(s.occupied_batches,0)} / ${M.number(s.max_batches,0)} 批`,
       prices:`候选开仓 ${M.number(s.candidate_entry_price,4)} / TP ${M.number(s.candidate_tp_price,4)} USDC`,
       pending:['market_gap','entry_paused','cancel_pending','grid_blocked','capacity_full','post_only_wait','take_profit_pending'].includes(s.phase)
@@ -25,7 +29,7 @@
   }
   function fillReason(fill) {
     const value = fill?.reason;
-    if (fill?.maker_model === scalperModel && ['maker_entry','maker_take_profit'].includes(value)) return value === 'maker_entry' ? 'Maker 剥头皮开仓' : 'Maker 批次止盈';
+    if (isScalperModel(fill?.maker_model) && ['maker_entry','maker_take_profit'].includes(value)) return value === 'maker_entry' ? 'Maker 剥头皮开仓' : 'Maker 批次止盈';
     return ({grid_entry:'网格买入',grid_buy:'网格买入',maker_entry:'Maker 网格买入',maker_take_profit:'Maker 网格止盈',grid_take_profit:'网格止盈',grid_tp:'网格止盈',take_profit:'止盈',delta_hedge:'敞口对冲调整',hedge:'空头对冲',hedge_open:'增加空头对冲',hedge_reduce:'减少空头对冲',rebalance:'对冲调整',hedge_rebalance:'对冲调整',initial:'初始建仓'}[value] || value || '—');
   }
   function entryProgress(row, data, elapsedSeconds = 0, disconnected = false) {
@@ -132,9 +136,9 @@
   }
   function fillPricing(row) {
     if (row?.pricing_mode === 'shared_indicative_v1') return `${row.cache_used ? '缓存参考价估算' : '共享参考价估算'} · 报价龄 ${M.number(row.quote_age_seconds, 1)} 秒 · 源数量 ${M.number(row.source_qty, 6)}${row.half_spread_percent == null ? '' : ' · 半点差 ' + percent(row.half_spread_percent, 4)}`;
-    return row?.venue === 'Variational' ? '原精确数量报价' : row?.maker_model === scalperModel ? '剥头皮 · 严格 Maker 队列模拟' : 'Maker 队列模拟';
+    return row?.venue === 'Variational' ? '原精确数量报价' : isScalperModel(row?.maker_model) ? '剥头皮 · 严格 Maker 队列模拟' : 'Maker 队列模拟';
   }
-  const helpers = {percent, label, isScalper, seconds, scalperStatus, entryProgress, fillReason, encoding, reconciliation, sampleIndex, exposureDomain, dollarExposureDomain, dollarHedge, hedgeLimit, historyValue, freshness, marketStatus, hedgeStatus, cooldownNotice, referenceStatus, fillPricing};
+  const helpers = {percent, label, isScalper, distanceFree, strategyTitle, entryDistanceRule, seconds, scalperStatus, entryProgress, fillReason, encoding, reconciliation, sampleIndex, exposureDomain, dollarExposureDomain, dollarHedge, hedgeLimit, historyValue, freshness, marketStatus, hedgeStatus, cooldownNotice, referenceStatus, fillPricing};
   if (typeof module !== 'undefined' && module.exports) {module.exports = helpers; return;}
   root.QQQModel = helpers;
   const $ = id => document.getElementById(id), E = M.escape;
@@ -230,7 +234,7 @@
     $('strategies').innerHTML = allRows().map((r, i) => {
       const entry = scalperStatus(r);
       const entryPanel = entry ? `<div class="entry-state"><div class="entry-progress" data-entry-progress="${i}"><div class="entry-progress-head"><span>下一次开仓 · 冷却进度</span><b data-progress-value>—</b></div><svg class="entry-progress-track" viewBox="0 0 100 8" preserveAspectRatio="none" aria-hidden="true" focusable="false"><rect class="entry-progress-background" width="100" height="8" rx="4"/><rect class="entry-progress-fill" width="0" height="8" rx="4"/></svg><span class="entry-progress-detail" data-progress-detail>等待有效冷却数据</span><span class="entry-progress-basis" data-progress-basis></span></div><strong class="${entry.pending ? 'pending' : ''}">采样时：${E(entry.phase)}</strong><span>${E(entry.gate)} · ${E(entry.orders)}</span><span>${E(entry.prices)}</span></div>` : '';
-      return `<button class="strategy ${cls(r)} ${state.strategy === r.name ? 'selected' : ''}" data-strategy="${E(r.name)}" aria-pressed="${state.strategy === r.name}"><div class="strategy-head"><h3>${entry ? '间距' : '网格'} ${percent(r.grid_step_percent, 2)}${entry ? ' / TP ' + percent(r.scalper.take_profit_percent,2) : ''}</h3><small>对冲阈值 ${hedgeLimit(r)}</small></div>${entryPanel}<span class="pnl-label">两腿累计净收益</span><strong class="big-pnl ${M.tone(r.total_pnl_usdc)}">${M.signed(r.total_pnl_usdc, 2)}<small>USDC</small></strong><div class="leg-pnls"><span>QQQ <b>${pnl(r.qqq?.total_pnl_usdc)}</b></span><span>US100 <b>${pnl(r.us100?.total_pnl_usdc)}</b></span></div><div class="strategy-stats"><div><span>${dollarHedge(r) ? '绝对净敞口 / 对冲阈值' : '实际敞口 / 容忍阈值'}</span><b>${dollarHedge(r) ? M.number(Math.abs(Number(r.net_exposure_usdc)),2) : percent(r.exposure_percent)} / ${hedgeLimit(r)}</b></div><div><span>净 / 总敞口（USDC）</span><b>${M.signed(r.net_exposure_usdc, 2)} / ${M.number(r.gross_exposure_usdc, 2)}</b></div><div><span>${entry ? '本档冷却' : '持仓格 / 待成交单'}</span><b>${entry ? E(seconds(r.scalper.cooldown_seconds)) : M.number(r.open_slots, 0) + ' / ' + M.number(r.resting_orders, 0)}</b></div><div><span>最大回撤 / USDC</span><b>${M.number(r.max_drawdown_usdc, 2)}</b></div></div><p class="control-status ${r.hedge_pending ? 'pending' : ''}">${E(hedgeStatus(r))}${reconciliation(r) === false ? ' · 两腿损益核对异常' : ''}</p></button>`;
+      return `<button class="strategy ${cls(r)} ${state.strategy === r.name ? 'selected' : ''}" data-strategy="${E(r.name)}" aria-pressed="${state.strategy === r.name}"><div class="strategy-head"><h3>${E(strategyTitle(r))}</h3><small>对冲阈值 ${hedgeLimit(r)}</small></div>${entryPanel}<span class="pnl-label">两腿累计净收益</span><strong class="big-pnl ${M.tone(r.total_pnl_usdc)}">${M.signed(r.total_pnl_usdc, 2)}<small>USDC</small></strong><div class="leg-pnls"><span>QQQ <b>${pnl(r.qqq?.total_pnl_usdc)}</b></span><span>US100 <b>${pnl(r.us100?.total_pnl_usdc)}</b></span></div><div class="strategy-stats"><div><span>${dollarHedge(r) ? '绝对净敞口 / 对冲阈值' : '实际敞口 / 容忍阈值'}</span><b>${dollarHedge(r) ? M.number(Math.abs(Number(r.net_exposure_usdc)),2) : percent(r.exposure_percent)} / ${hedgeLimit(r)}</b></div><div><span>净 / 总敞口（USDC）</span><b>${M.signed(r.net_exposure_usdc, 2)} / ${M.number(r.gross_exposure_usdc, 2)}</b></div><div><span>${entry ? '本档冷却' : '持仓格 / 待成交单'}</span><b>${entry ? E(seconds(r.scalper.cooldown_seconds)) : M.number(r.open_slots, 0) + ' / ' + M.number(r.resting_orders, 0)}</b></div><div><span>最大回撤 / USDC</span><b>${M.number(r.max_drawdown_usdc, 2)}</b></div></div><p class="control-status ${r.hedge_pending ? 'pending' : ''}">${E(hedgeStatus(r))}${reconciliation(r) === false ? ' · 两腿损益核对异常' : ''}</p></button>`;
     }).join('');
     if (focusedStrategy) Array.from($('strategies').children).find(node => node.dataset.strategy === focusedStrategy)?.focus({preventScroll:true});
     const values = allRows().map(r => r.total_pnl_usdc), total = values.every(M.finite) ? values.reduce((sum, value) => sum + Number(value), 0) : null;
@@ -318,22 +322,22 @@
     $('pagination').hidden = true;
     if (state.view === 'parameters') {
       const p = data?.summary?.parameters || {}, scalper = isScalper(data?.summary), config = data?.summary?.scalper;
-      const values = [['交易模式','仅模拟，不提交真实订单'],['账户组合',`${allRows().length} 个独立账户`],['QQQ 策略',scalper ? `LONG ONLY · 单张近盘口开仓 · 最多 ${M.number(p.grid_count,0)} 批` : `LONG ONLY · 固定锚点网格 · ${M.number(p.grid_count, 0)} 格`],[scalper ? '每批名义金额' : '每格名义金额',`${M.number(p.order_notional_usdc, 0)} USDC`],[scalper ? '新开仓距离门槛' : '网格间距',[...new Set(allRows().map(r => percent(r.grid_step_percent)))].join(' / ')],['对冲阈值',[...new Set(allRows().map(hedgeLimit))].join(' / ')],['对冲标的','Variational US100 空头'],['对冲目标',`美元名义金额 β = ${M.number(p.beta, 2)}`],['QQQ / US100 手续费',`${M.number(p.lighter_fee_bps, 2)} / ${M.number(p.var_fee_bps, 2)} bps`],['US100 额外滑点',`${M.number(p.var_slippage_bps, 2)} bps`],['对冲次数',rows().map(r => label(r) + '：' + M.number(r.hedge_adjustments, 0)).join(' / ')],['阈值口径',dollarHedge(allRows()[0]) ? '两腿净名义金额绝对值 / USDC' : '|净敞口| ÷ 两腿总敞口'],['QQQ 成交模型','公共成交 + 保守 Maker 队列'],['US100 成交模型','指示性买卖报价'],['资金费、隔夜费与股息调整','未计入损益']];
+      const values = [['交易模式','仅模拟，不提交真实订单'],['账户组合',`${allRows().length} 个独立账户`],['QQQ 策略',scalper ? `LONG ONLY · 单张近盘口开仓 · 最多 ${M.number(p.grid_count,0)} 批` : `LONG ONLY · 固定锚点网格 · ${M.number(p.grid_count, 0)} 格`],[scalper ? '每批名义金额' : '每格名义金额',`${M.number(p.order_notional_usdc, 0)} USDC`],[scalper ? '新开仓距离门槛' : '网格间距',distanceFree(data?.summary) ? '已取消' : [...new Set(allRows().map(r => percent(r.grid_step_percent)))].join(' / ')],['对冲阈值',[...new Set(allRows().map(hedgeLimit))].join(' / ')],['对冲标的','Variational US100 空头'],['对冲目标',`美元名义金额 β = ${M.number(p.beta, 2)}`],['QQQ / US100 手续费',`${M.number(p.lighter_fee_bps, 2)} / ${M.number(p.var_fee_bps, 2)} bps`],['US100 额外滑点',`${M.number(p.var_slippage_bps, 2)} bps`],['对冲次数',rows().map(r => label(r) + '：' + M.number(r.hedge_adjustments, 0)).join(' / ')],['阈值口径',dollarHedge(allRows()[0]) ? '两腿净名义金额绝对值 / USDC' : '|净敞口| ÷ 两腿总敞口'],['QQQ 成交模型','公共成交 + 保守 Maker 队列'],['US100 成交模型','指示性买卖报价'],['资金费、隔夜费与股息调整','未计入损益']];
       if (scalper) {
         const wait = M.finite(config.wait_seconds) ? Number(config.wait_seconds) : null;
         values.splice(5,0,
           ['逐批止盈目标',[...new Set(allRows().map(r => percent(r.scalper?.take_profit_percent)))].join(' / ')],
-          ['开仓距离规则','最小已有 TP ÷ [最优卖价 × (1 + TP%)] > 1 + 间距%；没有已有 TP 时通过'],
+          ['开仓距离规则',entryDistanceRule(data.summary)],
           ['基础等待',seconds(wait)],
           ['按待止盈批次数等待',`0–4 批 ${seconds(wait === null ? null : wait / 4)}；5–9 批 ${seconds(wait === null ? null : wait / 2)}；10–19 批 ${seconds(wait)}；20–29 批 ${seconds(wait === null ? null : wait * 2)}`],
-          ['开仓资格','首次可立即开仓；待止盈批次数比上次决策减少时，本轮免冷却；价格条件失败也消耗本轮豁免，仍须满足容量'],
+          ['开仓资格',distanceFree(data.summary) ? '首次无需冷却；待止盈批次数比上次决策减少时，本轮免冷却；仍须满足行情、容量、止盈覆盖和 Maker 挂单条件' : '首次可立即开仓；待止盈批次数比上次决策减少时，本轮免冷却；价格条件失败也消耗本轮豁免，仍须满足容量'],
           ['开仓改价',`${seconds(config.reprice_after_seconds)} 后允许改价，每 ${seconds(config.reprice_poll_seconds)} 检查；按实际采样处理`],
           ['占用容量','已有持仓与待成交开仓占用批次；达到上限时暂停新开仓'],
           ['逐批止盈','开仓完全成交，或部分成交后撤单确认，再为已成交数量挂独立 TP'],
           ['开仓取价','盘口中价与最小已有 TP 减一 tick 取较小值；按 tick 四舍五入，并限制在最优卖价减一 tick 以内'],
           ['止盈取价','本批入场价格 × (1 + TP%)，按 tick 向下取整'],
-          ['与原版 Lighter 的差异','参考 perp-dex-tools 的开仓与止盈流程；本地严格 Maker 队列模拟，不复刻原版 GTT 可能吃单的行为'],
-          ['采样状态','卡片冷却剩余为采样时的值；冷却结束仍需行情、价格距离和容量允许']
+          ['与原版 Lighter 的差异',`${distanceFree(data.summary) ? 'v2 已取消原版开仓距离门槛；' : ''}本地严格 Maker 队列模拟，不复刻原版 GTT 可能吃单的行为`],
+          ['采样状态',`卡片冷却进度为时间推算，异常时恢复采样值；冷却结束仍需${distanceFree(data.summary) ? '行情、容量和 Maker 挂单条件' : '行情、价格距离和容量'}允许`]
         );
       }
       if (data?.summary?.pricing) {

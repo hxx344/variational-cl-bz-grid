@@ -440,7 +440,7 @@ import json, sys
 from pathlib import Path
 data = json.loads(Path(sys.argv[1]).read_text())
 data['base_config'] = '/etc/variational-grid/config.json'
-data['output_dir'] = '/var/lib/variational-grid/qqq-hedge-scalper-v1'
+data['output_dir'] = '/var/lib/variational-grid/qqq-hedge-scalper-v2'
 Path(sys.argv[2]).write_text(json.dumps(data, indent=2) + '\n')
 PY
   chmod 644 "$conf/qqq-hedge.json"
@@ -487,7 +487,7 @@ if [[ $mode == qqq-hedge ]]; then
 from variational_grid.qqq_migration import upgrade_qqq_defaults
 backup = upgrade_qqq_defaults('/etc/variational-grid/qqq-hedge.json')
 if backup:
-    print(f'Updated to sequential QQQ scalper: three spacing/TP settings, dynamic 450s base wait, 3000 USDC hedge threshold; old configuration: {backup}; old ledgers preserved.')
+    print(f'Updated to QQQ scalper v2: no entry distance gate, three TP settings, dynamic 450s base wait, 3000 USDC hedge threshold; starting a new simulation; old configuration: {backup}; old ledgers preserved.')
 else:
     print('QQQ settings unchanged; skipping migration.')
 PY

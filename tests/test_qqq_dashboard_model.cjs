@@ -309,3 +309,32 @@ test('full cooldown never overrides price, capacity or maker eligibility gates',
     assert.equal(Q.scalperStatus(row).pending,true);
   }
 });
+
+test('distance-free scalper labels compare TP targets and preserve historical model semantics', () => {
+  const row = {grid_step_percent:'0.05',hedge_threshold_usdc:'3000',scalper:{model:'perp_dex_scalper_v2',take_profit_percent:'0.2',grid_allowed:null}};
+  assert.equal(Q.isScalper(row),true);
+  assert.equal(Q.distanceFree(row),true);
+  assert.equal(Q.strategyTitle(row),'止盈 0.20%');
+  assert.equal(Q.label(row),'剥头皮 TP 0.20% / 对冲 3,000 USDC');
+  assert.equal(Q.scalperStatus(row).gate,'新开仓距离门槛已取消');
+  assert.match(Q.entryDistanceRule(row),/^已取消/);
+  row.scalper.model = 'perp_dex_scalper_v1';
+  row.scalper.grid_allowed = false;
+  assert.equal(Q.strategyTitle(row),'间距 0.05% / TP 0.20%');
+  assert.equal(Q.scalperStatus(row).gate,'价格距离未满足');
+  assert.match(Q.entryDistanceRule(row),/最小已有 TP/);
+  assert.equal(Q.isScalper({scalper:{model:'unknown'}}),false);
+  assert.equal(Q.strategyTitle({grid_step_percent:'0.1'}),'网格 0.10%');
+});
+
+test('distance-free model still publishes cooldown progress and labels fill provenance', () => {
+  const row = progressRow({model:'perp_dex_scalper_v2',entry_distance_enabled:false,grid_allowed:null});
+  assert.equal(Q.entryProgress(row,progressData()).percent,50);
+  row.scalper.cooldown_remaining_seconds = 0;
+  assert.match(Q.entryProgress(row,progressData()).detail,/检查开仓条件/);
+  for (const model of ['perp_dex_scalper_v1','perp_dex_scalper_v2']) {
+    assert.equal(Q.fillReason({maker_model:model,reason:'maker_entry'}),'Maker 剥头皮开仓');
+    assert.equal(Q.fillReason({maker_model:model,reason:'maker_take_profit'}),'Maker 批次止盈');
+    assert.equal(Q.fillPricing({maker_model:model,venue:'Lighter'}),'剥头皮 · 严格 Maker 队列模拟');
+  }
+});

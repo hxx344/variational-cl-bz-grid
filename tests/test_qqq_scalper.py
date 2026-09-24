@@ -11,7 +11,7 @@ from variational_grid.models import D, GridError
 from variational_grid.qqq_comparison import QQQCohort, QQQExperiment
 from variational_grid.qqq_hedge import QQQConfig, QQQSettings, initial_account, maker_step
 from variational_grid.qqq_pricing import QQQPricing
-from variational_grid.qqq_scalper import ScalperSettings, candidate_prices, cooldown_seconds
+from variational_grid.qqq_scalper import CURRENT_MODEL, ScalperSettings, candidate_prices, cooldown_seconds
 from variational_grid.reset import process_reset, read_state, request_reset
 from test_qqq import market, quote, trade
 
@@ -166,12 +166,62 @@ class ScalperTests(unittest.TestCase):
                 ScalperSettings(wait_seconds=value).validate()
 
 
+class DistanceFreeScalperTests(ScalperTests):
+    # Exercise the existing order-lifetime cases against v2 as well as v1.
+    def setUp(self):
+        self.config = replace(config(), scalper=ScalperSettings(model=CURRENT_MODEL))
+        self.account, _ = maker_step(initial_account(), market(100), 100, self.config, True)
+
+    def test_single_near_book_entry_and_independent_tp_after_complete_fill(self):
+        account = self.filled()
+        self.assertEqual(account["scalper"]["status"]["phase"], "cooling_down")
+        self.assertEqual([o["side"] for o in account["orders"]], ["sell"])
+        _, fills = maker_step(self.account, market(102, [trade(1, 101, "100", "10")]), 102, self.config, True)
+        self.assertEqual(fills[0]["maker_model"], CURRENT_MODEL)
+
+    def test_grid_gate_uses_ask_tp_and_strict_comparison(self):
+        # v2 removes eligibility distance, but preserves TP and Maker limit pricing.
+        q = market(100, bid="99.98", ask="100")
+        for step in ("0.05", "0.1", "0.2"):
+            cfg = replace(self.config, grid_step_percent=step, take_profit_percent="2")
+            entry, target, allowed = candidate_prices(q, [D("99.97")], cfg)
+            self.assertTrue(allowed)
+            self.assertEqual((entry, target), (D("99.96"), D("101.95")))
+            self.assertFalse(candidate_prices(q, [D("99.97")], replace(cfg, scalper=ScalperSettings()))[2])
+
+    def test_failed_price_gate_consumes_close_count_cooldown_waiver(self):
+        account = self.filled()
+        account["scalper"]["last_close_count"] = 2
+        account, _ = maker_step(account, market(104, mark="100.02"), 104, self.config, True)
+        self.assertEqual(account["scalper"]["status"]["phase"], "opening")
+        self.assertTrue(account["scalper"]["status"]["cooldown_waived"])
+
+    def test_expired_cooldown_opens_even_when_legacy_distance_fails(self):
+        account = self.filled()
+        legacy = replace(self.config, scalper=ScalperSettings())
+        for now, phase in ((214.5, "cooling_down"), (214.6, "opening")):
+            after, _ = maker_step(account, market(now, mark="100.02"), now, self.config, True)
+            self.assertEqual(after["scalper"]["status"]["phase"], phase)
+        old, _ = maker_step(account, market(214.6, mark="100.02"), 214.6, legacy, True)
+        self.assertEqual(old["scalper"]["status"]["phase"], "grid_blocked")
+        self.assertFalse(after["scalper"]["status"]["entry_distance_enabled"])
+        self.assertIsNone(after["scalper"]["status"]["grid_allowed"])
+        self.assertEqual(len([o for o in after["orders"] if o["side"] == "buy"]), 1)
+        self.assertEqual(after["slots"][-1]["tp_price"], "100.07")
+
+
 class DurableScalperTests(unittest.TestCase):
     def test_restart_recovery_and_reset_preserve_or_clear_decisions_exactly(self):
+        for model in ("perp_dex_scalper_v1", CURRENT_MODEL):
+            with self.subTest(model=model):
+                self.check_restart_recovery_and_reset(model)
+
+    def check_restart_recovery_and_reset(self, model):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
-            configs = {name: replace(config(), name=name, state_file=str(root / (name + ".sqlite3")), hedge_threshold_usdc="500") for name in ("a", "b")}
-            experiment = QQQExperiment(SimpleNamespace(poll_seconds=2), root, configs, QQQSettings(), QQQPricing(mode="exact_quantity"), scalper=ScalperSettings())
+            policy = ScalperSettings(model=model)
+            configs = {name: replace(config(), name=name, state_file=str(root / (name + ".sqlite3")), hedge_threshold_usdc="500", scalper=policy) for name in ("a", "b")}
+            experiment = QQQExperiment(SimpleNamespace(poll_seconds=2), root, configs, QQQSettings(), QQQPricing(mode="exact_quantity"), scalper=policy)
             def frame(cohort, ts, trades=()):
                 f = cohort.prepare_frame(ts, {"lighter": market(ts, trades), "var": quote(ts), "allow_entries": True, "reason": ""}, data_kind="synthetic")
                 for name, plan in f.plans.items():
@@ -203,6 +253,21 @@ class DurableScalperTests(unittest.TestCase):
                 result = cohort.ingest(frame(cohort, 106))
                 self.assertTrue(all(r["scalper"]["active_entries"] == 1 for r in result["scenarios"]))
                 self.assertTrue(all(store.account()["scalper"]["last_entry_ts"] is None for store in cohort.stores.values()))
+
+    def test_v2_cannot_resume_v1_economic_identity_in_same_directory(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            cfg = replace(config(), state_file=str(root / "a.sqlite3"))
+            old = QQQExperiment(SimpleNamespace(poll_seconds=2), root, {"a":cfg}, QQQSettings(), scalper=cfg.scalper)
+            with QQQCohort(old):
+                pass
+            policy = ScalperSettings(model=CURRENT_MODEL)
+            new = replace(old, scenarios={"a":replace(cfg, scalper=policy)}, scalper=policy)
+            with self.assertRaises(GridError):
+                with QQQCohort(new):
+                    pass
+            with QQQCohort(old):
+                pass
 
 
 if __name__ == "__main__":

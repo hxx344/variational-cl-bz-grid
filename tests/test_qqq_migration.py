@@ -11,6 +11,7 @@ from variational_grid.qqq_comparison import QQQExperiment, QQQCohort, QQQMarketF
 from variational_grid.qqq_hedge import QQQSettings
 from variational_grid.qqq_market import VarSwapClient
 from variational_grid.qqq_migration import upgrade_qqq_defaults, VERSION
+from variational_grid.qqq_scalper import CURRENT_MODEL, ScalperSettings
 from test_qqq import market
 from test_qqq_cache import PublicSource
 from test_qqq_market import NOW
@@ -28,6 +29,14 @@ def three_spec(base="base.json", output="old-three"):
             "pricing": {"mode": "shared_indicative_v1", "half_spread_percent": "0.0015"},
             "scenarios": [{"name": f"grid-{step}-hedge-3000usd", "grid_step_percent": step, "hedge_threshold_usdc": "3000"}
                           for step in ("0.05", "0.1", "0.2")]}
+
+
+def scalper_spec(base="base.json", output="old-scalper-v1"):
+    data = three_spec(base, output)
+    data["scalper"] = asdict(ScalperSettings())
+    for row in data["scenarios"]:
+        row["take_profit_percent"] = row["grid_step_percent"]
+    return data
 
 
 class MigrationTests(unittest.TestCase):
@@ -52,6 +61,7 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual(new.settings.var_slippage_bps, "0")
         self.assertEqual(new.pricing.half_spread_percent, "0.0015")
         self.assertEqual(new.scalper.wait_seconds, 450)
+        self.assertEqual(new.scalper.model, CURRENT_MODEL)
         self.assertTrue(all(c.take_profit_percent == c.grid_step_percent for c in new.scenarios.values()))
         self.assertEqual(backup.read_bytes(), original)
         self.assertEqual((old.output / "experiment.json").read_bytes(), manifest)
@@ -82,7 +92,7 @@ class MigrationTests(unittest.TestCase):
             upgrade_qqq_defaults(self.path)
         self.assertEqual(self.path.read_bytes(), original)
         self.assertEqual(sentinel.read_bytes(), b"keep")
-        backup = self.path.with_name("qqq.before-scalper-v1.json")
+        backup = self.path.with_name("qqq.before-scalper-v2.json")
         backup.write_bytes(b"other config")
         with self.assertRaisesRegex(GridError, "backup"):
             upgrade_qqq_defaults(self.path)
@@ -119,6 +129,46 @@ class MigrationTests(unittest.TestCase):
         self.assertIsNone(upgrade_qqq_defaults(self.path))
         self.assertEqual(self.path.read_bytes(), original)
 
+    def test_v1_upgrade_keeps_old_accounts_and_backup_with_distinct_new_identity(self):
+        self.path.write_text(json.dumps(scalper_spec()))
+        old = QQQExperiment.load(self.path)
+        with QQQCohort(old):
+            pass
+        history = {p.relative_to(old.output): p.read_bytes() for p in old.output.rglob("*") if p.is_file()}
+        original = self.path.read_bytes()
+        prior_backup = self.path.with_name("qqq.before-scalper-v1.json")
+        prior_backup.write_bytes(b"earlier ladder configuration")
+        backup = upgrade_qqq_defaults(self.path)
+        new = QQQExperiment.load(self.path)
+        self.assertEqual(backup.read_bytes(), original)
+        self.assertEqual(prior_backup.read_bytes(), b"earlier ladder configuration")
+        self.assertEqual(new.scalper.model, CURRENT_MODEL)
+        self.assertFalse(new.scalper.entry_distance_enabled)
+        self.assertEqual(new.previous_output, old.output)
+        self.assertNotEqual(new.identity(), old.identity())
+        self.assertEqual(history, {p.relative_to(old.output): p.read_bytes() for p in old.output.rglob("*") if p.is_file()})
+        with QQQCohort(new) as cohort, QQQCohort(old):
+            self.assertIsNone(cohort.latest())
+        updated = self.path.read_bytes()
+        self.assertIsNone(upgrade_qqq_defaults(self.path))
+        self.assertEqual(updated, self.path.read_bytes())
+
+    def test_custom_scalper_timing_tp_and_settings_are_preserved(self):
+        for section, key, value in (("scalper", "wait_seconds", 400), ("strategy", "grid_count", 20),
+                                    ("scalper", "reprice_after_seconds", 15), ("pricing", "half_spread_percent", "0.002")):
+            data = scalper_spec()
+            data[section][key] = value
+            self.path.write_text(json.dumps(data))
+            original = self.path.read_bytes()
+            self.assertIsNone(upgrade_qqq_defaults(self.path))
+            self.assertEqual(self.path.read_bytes(), original)
+        data = scalper_spec()
+        data["scenarios"][0]["take_profit_percent"] = "0.03"
+        self.path.write_text(json.dumps(data))
+        original = self.path.read_bytes()
+        self.assertIsNone(upgrade_qqq_defaults(self.path))
+        self.assertEqual(self.path.read_bytes(), original)
+
     def test_custom_price_model_is_preserved_while_cache_timing_can_migrate(self):
         for policy in ({"mode": "exact_quantity"}, {"half_spread_percent": "0.01"}):
             data = legacy_spec()
@@ -134,6 +184,7 @@ class MigrationTests(unittest.TestCase):
         self.assertEqual((new.pricing.refresh_after_seconds, new.pricing.max_age_seconds), (4, 90))
 
     def test_new_output_inherits_cooldown_before_any_http_without_precreating_directory(self):
+        self.path.write_text(json.dumps(scalper_spec()))
         old = QQQExperiment.load(self.path)
         now = [NOW]
         source = PublicSource(now)

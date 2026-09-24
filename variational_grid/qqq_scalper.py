@@ -11,6 +11,7 @@ from .models import D, GridError, dec
 
 
 SOURCE_COMMIT = "4679a339b8cdc9998707feeda3c5d8b84fb8681f"
+CURRENT_MODEL = "perp_dex_scalper_v2"
 
 
 @dataclass(frozen=True)
@@ -20,8 +21,12 @@ class ScalperSettings:
     reprice_after_seconds: float = 20
     reprice_poll_seconds: float = 5
 
+    @property
+    def entry_distance_enabled(self):
+        return self.model == "perp_dex_scalper_v1"
+
     def validate(self):
-        if self.model != "perp_dex_scalper_v1":
+        if self.model not in {"perp_dex_scalper_v1", CURRENT_MODEL}:
             raise GridError("Unknown QQQ scalper model")
         for name in ("wait_seconds", "reprice_after_seconds", "reprice_poll_seconds"):
             value = getattr(self, name)
@@ -48,7 +53,7 @@ def candidate_prices(market, closes, config):
     entry = min((price / tick).to_integral_value(rounding=ROUND_HALF_UP) * tick, floor(ask - tick, tick))
     profit = dec(config.take_profit_percent or config.grid_step_percent) / 100
     target = floor(entry * (1 + profit), tick)
-    gate = not closes or min(closes) / (ask * (1 + profit)) > 1 + dec(config.grid_step_percent) / 100
+    gate = not config.scalper.entry_distance_enabled or not closes or min(closes) / (ask * (1 + profit)) > 1 + dec(config.grid_step_percent) / 100
     return entry, target, gate
 
 
@@ -164,7 +169,7 @@ def scalper_step(before, market, now, config, allow_entries):
         wait = cooldown_seconds(count, settings.grid_count, policy.wait_seconds)
         remaining = 0 if state["last_entry_ts"] is None else state["last_entry_ts"] + wait - now
         # Like the reference, only a net decline since the last entry decision
-        # waives this round's cooldown; a failed price gate consumes the waiver.
+        # waives this round's cooldown; in v1 a failed price gate consumes the waiver.
         credit = count < state["last_close_count"]
         waived = credit
         state["last_close_count"] = count
@@ -202,7 +207,7 @@ def _status(account, market, now, config, phase, gate, waived=False):
     entry, target, _ = candidate_prices(market, closes, config)
     wait = cooldown_seconds(len(closes), config.settings.grid_count, config.scalper.wait_seconds)
     next_at = None if state["last_entry_ts"] is None else state["last_entry_ts"] + wait
-    return {"model": config.scalper.model, "phase": phase, "wait_seconds": config.scalper.wait_seconds,
+    result = {"model": config.scalper.model, "phase": phase, "wait_seconds": config.scalper.wait_seconds,
             "cooldown_waived": waived,
             "cooldown_seconds": wait, "cooldown_remaining_seconds": 0 if next_at is None else max(0, next_at - now),
             "next_entry_at": next_at, "grid_allowed": gate, "candidate_entry_price": str(entry), "candidate_tp_price": str(target),
@@ -210,3 +215,6 @@ def _status(account, market, now, config, phase, gate, waived=False):
             "active_take_profits": sum(o["side"] == "sell" for o in account["orders"]),
             "occupied_batches": len(account["slots"]), "max_batches": config.settings.grid_count,
             "take_profit_percent": config.take_profit_percent or config.grid_step_percent}
+    if not config.scalper.entry_distance_enabled:
+        result.update(entry_distance_enabled=False, grid_allowed=None)
+    return result

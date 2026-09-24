@@ -1,4 +1,4 @@
-"""Move recognized ladder defaults into a separate sequential scalper run."""
+"""Move recognized ladder/v1 defaults into a separate distance-free scalper run."""
 from dataclasses import asdict, replace
 import json
 import os
@@ -8,10 +8,10 @@ import tempfile
 from .models import GridError, dec
 from .qqq_comparison import QQQExperiment
 from .qqq_hedge import QQQSettings
-from .qqq_scalper import ScalperSettings
+from .qqq_scalper import CURRENT_MODEL, ScalperSettings
 
 
-VERSION = "-scalper-v1"
+VERSION = "-scalper-v2"
 
 
 def upgrade_qqq_defaults(path):
@@ -23,9 +23,11 @@ def upgrade_qqq_defaults(path):
     three = {f"grid-{step}-hedge-3000usd": (step, "3000") for step in ("0.05", "0.1", "0.2")}
     names = {r.get("name") for r in rows}
     nine = len(rows) == 9 and names == set(expected)
-    if "scalper" in data or not (nine or len(rows) == 3 and names == set(three)):
+    if not (nine or len(rows) == 3 and names == set(three)):
         return None
     previous = QQQExperiment.load(path)
+    if previous.scalper is not None and (nine or previous.scalper != ScalperSettings()):
+        return None  # Latest model and customized scalper timing are preserved.
     defaults = QQQSettings() if nine else replace(QQQSettings(), var_slippage_bps="0")
     if (asdict(previous.settings) != asdict(defaults) or Path(data["output_dir"]).name.endswith(VERSION)
             or previous.pricing.mode != "shared_indicative_v1"
@@ -37,8 +39,10 @@ def upgrade_qqq_defaults(path):
         step, band = expected[row["name"]]
         if row.get(band_key) is None or dec(row["grid_step_percent"]) != dec(step) or dec(row[band_key]) != dec(band):
             return None
+        if previous.scalper is not None and dec(row.get("take_profit_percent", step)) != dec(step):
+            return None
     data["strategy"]["var_slippage_bps"] = "0"
-    data["scalper"] = asdict(ScalperSettings())
+    data["scalper"] = asdict(ScalperSettings(model=CURRENT_MODEL))
     data["scenarios"] = [{"name": f"grid-{step}-hedge-3000usd", "grid_step_percent": step,
                           "take_profit_percent": step, "hedge_threshold_usdc": "3000"}
                          for step in ("0.05", "0.1", "0.2")]

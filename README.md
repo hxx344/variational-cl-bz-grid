@@ -1,6 +1,6 @@
 # 跨品种网格与对冲模拟
 
-提供 CL/BZ 价差网格、CL/BZ 库存组合，以及 **Lighter QQQ 只做多挂单剥头皮 + Variational US100 对冲**三种独立纸面策略。QQQ 模式对照三种间距，共三组，统一净敞口阈值 3000 USDC，单组最多 30 个批次、每批 1000 USDC；部署和统计口径见文末。
+提供 CL/BZ 价差网格、CL/BZ 库存组合，以及 **Lighter QQQ 只做多挂单剥头皮 + Variational US100 对冲**三种独立纸面策略。QQQ 模式取消新开仓距离门槛，对照三种止盈比例，共三组，统一净敞口阈值 3000 USDC，单组最多 30 个批次、每批 1000 USDC；部署和统计口径见文末。
 
 CL/BZ 模式从 Variational Omni 的前端接口读取真实行情，在本地模拟 CL、BZ 等桶数双腿市价成交。以 **BZ − CL 的最近 3 日平均价差**为中枢。无需钱包私钥；该模式使用已经登录的 `vr-token` Cookie 请求与每腿桶数相匹配的指示性买卖报价。
 
@@ -311,17 +311,16 @@ python -m variational_grid inventory-demo --output output/inventory-divergence -
 
 ## Lighter QQQ 剥头皮与 US100 对冲：三组
 
-三个独立模拟账户分别使用 **0.05% / 0.1% / 0.2%** 开仓间距，止盈比例沿用各组间距；QQQ 只做多，最多 30 个占用批次，每批计划 1,000 USDC。US100 用于按需对冲，每组统一 **3,000 USDC 净敞口阈值**。参数见 `qqq-hedge.example.json`，各组独立保存两腿损益、持仓、成交数量和成交额。
+三个独立模拟账户分别使用 **0.05% / 0.1% / 0.2%** 止盈比例，新开仓不再要求与已有批次保持价格距离；QQQ 只做多，最多 30 个占用批次，每批计划 1,000 USDC。US100 用于按需对冲，每组统一 **3,000 USDC 净敞口阈值**。参数见 `qqq-hedge.example.json`，各组独立保存两腿损益、持仓、成交数量和成交额。`grid_step_percent` 保留用于历史配置兼容及缺省 TP，v2 不用它判断新开仓资格。
 
-新模型 `perp_dex_scalper_v1` 依据 [perp-dex-tools 的 TradingBot](https://github.com/your-quantguy/perp-dex-tools/blob/4679a339b8cdc9998707feeda3c5d8b84fb8681f/trading_bot.py) 和 [Lighter 适配器](https://github.com/your-quantguy/perp-dex-tools/blob/4679a339b8cdc9998707feeda3c5d8b84fb8681f/exchanges/lighter.py) 的开仓、等待及止盈规则独立实现：一次只挂一张近盘口开仓单，成交后逐批挂独立止盈。30 指最多占用批次，并非同时预挂 30 张买单。下一笔开仓价根据当时盘口计算，批次编号单调递增。
+新模型 `perp_dex_scalper_v2` 在原 `perp_dex_scalper_v1` 上取消开仓距离资格检查，其余开仓、等待与止盈规则继续参考 [perp-dex-tools 的 TradingBot](https://github.com/your-quantguy/perp-dex-tools/blob/4679a339b8cdc9998707feeda3c5d8b84fb8681f/trading_bot.py) 和 [Lighter 适配器](https://github.com/your-quantguy/perp-dex-tools/blob/4679a339b8cdc9998707feeda3c5d8b84fb8681f/exchanges/lighter.py)：一次只挂一张近盘口开仓单，成交后逐批挂独立止盈。30 指最多占用批次，并非同时预挂 30 张买单。下一笔开仓价根据当时盘口计算，批次编号单调递增。
 
-基础等待 `scalper.wait_seconds=450`，从上一笔开仓完成（或部分成交撤单确认）开始计时。未平仓批次数为 0–4 / 5–9 / 10–19 / 20–29 时，等待分别为 **112.5 / 225 / 450 / 900 秒**；等待时间需严格超过该值。若未平仓批次数比上一次开仓决策减少，本轮跳过冷却，但仍检查价格间距；价格条件失败也会消耗本轮豁免。达到 30 个占用批次暂停加仓。
+基础等待 `scalper.wait_seconds=450`，从上一笔开仓完成（或部分成交撤单确认）开始计时。未平仓批次数为 0–4 / 5–9 / 10–19 / 20–29 时，等待分别为 **112.5 / 225 / 450 / 900 秒**；等待时间需严格超过该值。若未平仓批次数比上一次开仓决策减少，本轮跳过冷却；v2 无价格距离资格检查，但仍需行情可用、已有批次有止盈单及 Maker 挂单条件成立。达到 30 个占用批次暂停加仓。
 
-做多时的价格条件与原机器人一致，`step` 和 `tp` 均是配置百分比除以 100：
+取消资格门槛不改变挂单取价，`tp` 是止盈百分比除以 100：
 
 ```text
-无未平仓批次：价格条件通过
-有未平仓批次：min(已有止盈价) / [当前 ask × (1 + tp)] > 1 + step
+新开仓资格：不检查与已有批次的价格距离
 候选开仓价：min(盘口中价, 所有已有止盈价 − 一个 tick)
 每批止盈价：实际开仓限价 × (1 + tp)，向下取整到 tick
 ```
@@ -329,6 +328,8 @@ python -m variational_grid inventory-demo --output output/inventory-divergence -
 候选开仓价按 tick 四舍五入，再限制到 `ask − tick`，保持 Maker。未成交开仓单在提交 20 秒后首次检查，随后每 5 秒检查：候选价格上涨则撤单，撤单生效后重新判断入场；持平或下降则继续等待。部分成交先保留剩余开仓单，完全成交或撤单确认后，仅为实际成交数量挂止盈。行情恢复时重建止盈，不补造缺口期间的成交；止盈暂时无法挂出时暂停继续加仓。
 
 原适配器实际使用 GTT 限价单；本程序沿用**严格 Maker 的公开逐笔、可见排队量、提交及撤单延迟模拟**，不复制原 SDK 的真实下单行为。仅触价不直接成交，同一批采样不能成交刚生成的止盈单。三组最多各占用 30 批库存，满批计划入场金额约 30,000 USDC，市值随价格变化，US100 对冲金额另计。旧配置未指定 `scalper` 时继续按旧固定锚点模型读取和运行。
+
+历史 `perp_dex_scalper_v1` 保留原规则：有未平仓批次时要求 `min(已有止盈价) / [当前 ask × (1 + tp)] > 1 + step`，失败会消耗本轮冷却豁免；未指定 `scalper.model` 的已有剥头皮配置仍解释为 v1。新旧模型不能直接续写同一账本。
 
 对冲按美元净名义金额计算，数量带方向：
 
@@ -356,6 +357,15 @@ US100 模拟买卖价按**半点差0.0015%（0.15 bps）**计算，全点差0.00
 
 QQQ模式只读Lighter公开盘口/成交和Variational公开 `POST /api/quotes/simple`，**无需token、交易账户或钱包私钥**。三个账户共用一份0.01 index unit参考报价，并按各自数量估算模拟价格；不是每笔数量分别获得的交易所成交价，也不模拟随下单规模变化的额外价格冲击。
 
+当前共享报价模式的 Var 请求只有两类，网页刷新只读取本地账本：
+
+| 请求 | 用途 | 默认频率 |
+| --- | --- | --- |
+| `POST /api/quotes/simple`，`US100S`、`qty=0.01` | 三组共用的指示性参考价与数量限制 | 源报价超过 3 秒时，在下一次采样尝试刷新；默认 2 秒采样通常约 4 秒一次，网络延迟和报价时间会影响实际间隔 |
+| `GET /api/metadata/supported_assets?cex_asset=US100S` | 合约定义、交易时段、休市和只减仓状态 | 报价前检查，本地正常缓存约 30 秒；不会为每组分别请求 |
+
+模拟开仓、止盈及 US100 对冲不会发送真实订单；共享参考价也不会按三组各自成交数量追加询价。此模式不调用 `/api/me`、`/api/quotes/indicative` 或 `/api/candles`。下面的请求间隔是程序自身预算，不代表平台公布的 API 限额。
+
 `pricing.refresh_after_seconds=3`：源报价年龄不超过3秒直接复用，超过3秒尝试更新。`pricing.max_age_seconds=60`：刷新遇到排队、429或网络失败时，默认最多使用60秒缓存，随后暂停新网格和对冲。原始报价写入 `quote-cache.json`，重启、升级和重置不改写源时间。行情已知休市、metadata超过120秒或到达休市时间时，缓存也不可用于模拟成交。QQQ盘口和逐笔时效要求不放宽。
 
 HTTP冷却独立于缓存可用性。每次Var请求占用3秒预算，429后6秒；遵守 `Retry-After`，失败至少60秒退避，连续429按60/120/240/480/900秒增加，平台要求更久则等更久。冷却持久保存，换到新三组账本会继承旧冷却，不绕过限流。账户不会为每个微小数量变化再发一次请求。
@@ -368,7 +378,7 @@ HTTP冷却独立于缓存可用性。每次Var请求占用3秒预算，429后6�
 curl -fsSL https://raw.githubusercontent.com/hxx344/variational-cl-bz-grid/main/install.sh | sudo bash -s -- --qqq-hedge
 ```
 
-配置在 `/etc/variational-grid/qqq-hedge.json`，首次安装默认数据目录 `/var/lib/variational-grid/qqq-hedge-scalper-v1/`。识别到历史默认九组或三组固定锚点配置时，安装器备份原配置为 `qqq-hedge.before-scalper-v1.json`，将原目录名加上 `-scalper-v1` 后开始新的三组模拟，旧配置、账本和 CL/BZ 数据均保留，新目录继承原报价缓存和限流冷却。自定义组合或经济参数不会被自动覆盖。重复执行采用增量更新，未变化时复用代码和验证结果，不重复重启；服务器仅执行快速离线部署检查，完整测试在 CI 执行。
+配置在 `/etc/variational-grid/qqq-hedge.json`，首次安装默认数据目录 `/var/lib/variational-grid/qqq-hedge-scalper-v2/`。识别到默认 v1 剥头皮三组，或历史默认九组/三组固定锚点配置时，安装器备份原配置为 `qqq-hedge.before-scalper-v2.json`，将原目录名加上 `-scalper-v2` 后开始无距离门槛的新三组模拟。旧配置、旧持仓与损益账本、已有 v1 备份和 CL/BZ 数据均原样保留；新一轮从空仓与零统计开始，仅继承公开报价缓存和限流冷却。自定义时序、TP、组合或经济参数不会被自动覆盖。重复执行采用增量更新，未变化时复用代码和验证结果，不重复重启；服务器仅执行快速离线部署检查，完整测试在 CI 执行。
 
 网页沿用服务 `variational-grid-web.service`，监听服务器 `127.0.0.1:9876`。在自己电脑保持SSH转发：
 
@@ -376,7 +386,7 @@ curl -fsSL https://raw.githubusercontent.com/hxx344/variational-cl-bz-grid/main/
 ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=6 -L 127.0.0.1:18765:127.0.0.1:9876 USER@SERVER_IP
 ```
 
-浏览器打开 [监控页](http://127.0.0.1:18765/)。各账户图表、两腿损益与成交量分别显示；新三组的敞口图单位为USDC，阈值线为±3000，旧百分比实验保持原单位。剥头皮卡片显示下一次开仓的冷却进度、百分比与剩余秒数，按各组当前档位的总等待时间计算，正常运行时每秒推算，无额外行情请求。100%仅表示冷却已到，实际开仓仍需策略采样确认价格距离、批次容量和行情条件；已有开仓单时显示处理中，不套用上一轮冷却。行情过期、服务停止或页面断连时恢复最后采样值并标注暂停推算。卡片同时保留采样时的开仓阶段、价格条件、开仓单和独立止盈单数量、占用批次及候选价格。
+浏览器打开 [监控页](http://127.0.0.1:18765/)。各账户图表、两腿损益与成交量分别显示；新三组的敞口图单位为USDC，阈值线为±3000，旧百分比实验保持原单位。剥头皮卡片显示下一次开仓的冷却进度、百分比与剩余秒数，按各组当前档位的总等待时间计算，正常运行时每秒推算，无额外行情请求。100%仅表示冷却已到，实际开仓仍需策略采样确认批次容量、行情与 Maker 条件；历史 v1 另检查价格距离。已有开仓单时显示处理中，不套用上一轮冷却。行情过期、服务停止或页面断连时恢复最后采样值并标注暂停推算。v2 明确显示门槛已取消，并按三档止盈目标命名账户；历史页保留原模型语义。
 
 ```bash
 python -m variational_grid compare --experiments qqq-hedge.example.json
