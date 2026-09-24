@@ -194,3 +194,118 @@ test('a waived cooldown or an active entry never displays a contradictory entry 
   row.scalper.cooldown_waived = false;
   assert.equal(Q.scalperStatus(row).waiting,'开仓单处理中，下次冷却从入场完成起算');
 });
+
+function progressRow(overrides = {}) {
+  return {scalper:{model:'perp_dex_scalper_v1', phase:'cooling_down', active_entries:0,
+    cooldown_seconds:225, cooldown_remaining_seconds:112.5, next_entry_at:1112.5, ...overrides}};
+}
+function progressData(overrides = {}) {
+  return {server_ts:1000, runtime:{status:'running'}, summary:{ts:1000, poll_seconds:2,
+    market:{source_status:'ready', gap:false}}, ...overrides};
+}
+
+test('entry progress uses each published tier and both server sample age and monotonic elapsed time', () => {
+  for (const total of [112.5,225,450,900]) {
+    const p = Q.entryProgress(progressRow({cooldown_seconds:total,cooldown_remaining_seconds:total / 2}), progressData());
+    assert.equal(p.percent,50);
+    assert.equal(p.total,total);
+    assert.equal(p.remaining,total / 2);
+  }
+  const p = Q.entryProgress(progressRow(),progressData({server_ts:1002}),3);
+  assert.equal(p.remaining,107.5);
+  assert.equal(p.percent,52.2);
+  assert.equal(p.frozen,false);
+  assert.match(p.basis,/估算/);
+});
+
+test('entry progress clamps boundaries without prematurely announcing completion', () => {
+  assert.equal(Q.entryProgress(progressRow({cooldown_remaining_seconds:500}),progressData()).percent,0);
+  const almost = Q.entryProgress(progressRow({cooldown_remaining_seconds:0.0001}),progressData());
+  assert.equal(almost.percent,99.9);
+  assert.match(almost.detail,/剩余 0.1 秒/);
+  const done = Q.entryProgress(progressRow({cooldown_remaining_seconds:2}),progressData(),3);
+  assert.equal(done.percent,100);
+  assert.equal(done.remaining,0);
+  assert.match(done.detail,/等待下一次采样检查/);
+  assert.equal(Q.entryProgress(progressRow({cooldown_seconds:0,cooldown_remaining_seconds:0}),progressData()).percent,100);
+});
+
+test('an in-flight or cancelling entry never reuses the preceding cooldown or waiver', () => {
+  for (const phase of ['opening','awaiting_fill','cancel_pending']) {
+    const p = Q.entryProgress(progressRow({phase,cooldown_waived:true}),progressData(),10);
+    assert.equal(p.mode,'order');
+    assert.equal(p.percent,null);
+    assert.equal(p.remaining,null);
+    assert.match(p.detail,/成交或撤单确认后/);
+  }
+  assert.equal(Q.entryProgress(progressRow({active_entries:1}),progressData()).mode,'order');
+});
+
+test('first entry and waived wait are distinct from a timed cooldown and retain conditional wording', () => {
+  const first = Q.entryProgress(progressRow({next_entry_at:null,cooldown_remaining_seconds:0}),progressData());
+  assert.equal(first.mode,'first');
+  assert.match(first.detail,/检查开仓条件/);
+  const waived = Q.entryProgress(progressRow({cooldown_waived:true}),progressData());
+  assert.equal(waived.mode,'waived');
+  assert.match(waived.detail,/仍需满足/);
+  assert.equal(waived.remaining,null);
+});
+
+test('missing or malformed cooldowns remain unknown and legacy grids have no progress', () => {
+  assert.equal(Q.entryProgress({grid_step_percent:'0.05'},progressData()),null);
+  for (const bad of [null,undefined,'',true,'bad',Infinity]) {
+    for (const field of ['cooldown_seconds','cooldown_remaining_seconds']) {
+      const p = Q.entryProgress(progressRow({[field]:bad}),progressData());
+      assert.equal(p.mode,'unknown');
+      assert.equal(p.percent,null);
+    }
+  }
+  assert.equal(Q.entryProgress(progressRow({cooldown_seconds:-1}),progressData()).mode,'unknown');
+  assert.equal(Q.entryProgress(progressRow({cooldown_seconds:0}),progressData()).mode,'unknown');
+});
+
+test('unavailable runtime, connection or server clock restores the explicit sample value', () => {
+  for (const runtime of ['stopped','paused','degraded','starting','resetting',undefined]) {
+    const p = Q.entryProgress(progressRow(),progressData({runtime:{status:runtime}}),20);
+    assert.equal(p.frozen,true);
+    assert.equal(p.remaining,112.5);
+    assert.match(p.basis,/采样值/);
+  }
+  for (const server_ts of [null,undefined,'bad',999]) {
+    assert.equal(Q.entryProgress(progressRow(),progressData({server_ts}),20).remaining,112.5);
+  }
+  const offline = Q.entryProgress(progressRow(),progressData(),20,true);
+  assert.equal(offline.remaining,112.5);
+  assert.match(offline.basis,/连接中断/);
+  assert.equal(Q.entryProgress(progressRow(),progressData(),61).remaining,112.5);
+  assert.equal(Q.entryProgress(progressRow(),progressData(),-10).remaining,112.5);
+});
+
+test('market gaps, unknown sources and expired Var references stop interpolation', () => {
+  const d = progressData();
+  for (const source_status of ['paused_entries','stale',undefined,'unknown']) {
+    d.summary.market.source_status = source_status;
+    assert.equal(Q.entryProgress(progressRow(),d,10).frozen,true);
+  }
+  d.summary.market = {source_status:'ready',gap:true};
+  assert.equal(Q.entryProgress(progressRow(),d,10).frozen,true);
+  d.summary.market.gap = false;
+  for (const phase of ['market_gap','entry_paused']) assert.equal(Q.entryProgress(progressRow({phase}),d,10).frozen,true);
+  d.summary.market.quote_cache = {mode:'shared_indicative_v1',available:true,source_ts:945,max_age_seconds:60};
+  assert.equal(Q.entryProgress(progressRow(),d,5).frozen,false);
+  const expired = Q.entryProgress(progressRow(),d,6);
+  assert.equal(expired.frozen,true);
+  assert.equal(expired.remaining,112.5);
+  assert.match(expired.basis,/参考报价不可用/);
+});
+
+test('full cooldown never overrides price, capacity or maker eligibility gates', () => {
+  for (const phase of ['grid_blocked','capacity_full','post_only_wait','take_profit_pending']) {
+    const row = progressRow({phase,cooldown_remaining_seconds:0,grid_allowed:false});
+    const p = Q.entryProgress(row,progressData());
+    assert.equal(p.percent,100);
+    assert.match(p.detail,/检查开仓条件/);
+    assert.equal(Q.scalperStatus(row).gate,'价格距离未满足');
+    assert.equal(Q.scalperStatus(row).pending,true);
+  }
+});

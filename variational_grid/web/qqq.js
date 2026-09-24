@@ -28,6 +28,37 @@
     if (fill?.maker_model === scalperModel && ['maker_entry','maker_take_profit'].includes(value)) return value === 'maker_entry' ? 'Maker 剥头皮开仓' : 'Maker 批次止盈';
     return ({grid_entry:'网格买入',grid_buy:'网格买入',maker_entry:'Maker 网格买入',maker_take_profit:'Maker 网格止盈',grid_take_profit:'网格止盈',grid_tp:'网格止盈',take_profit:'止盈',delta_hedge:'敞口对冲调整',hedge:'空头对冲',hedge_open:'增加空头对冲',hedge_reduce:'减少空头对冲',rebalance:'对冲调整',hedge_rebalance:'对冲调整',initial:'初始建仓'}[value] || value || '—');
   }
+  function entryProgress(row, data, elapsedSeconds = 0, disconnected = false) {
+    if (!isScalper(row)) return null;
+    const s = row.scalper, summary = data?.summary, market = summary?.market;
+    const valid = value => typeof value !== 'boolean' && M.finite(value);
+    const elapsed = valid(elapsedSeconds) ? Math.max(0, Number(elapsedSeconds)) : 0;
+    const clockKnown = valid(data?.server_ts) && valid(summary?.ts) && Number(data.server_ts) >= Number(summary.ts);
+    const age = clockKnown ? Number(data.server_ts) - Number(summary.ts) + elapsed : null;
+    const stale = age !== null && age > Math.max(60, valid(summary?.poll_seconds) ? Number(summary.poll_seconds) * 3 : 60);
+    const reference = referenceStatus(data, elapsed);
+    const frozen = disconnected ? '连接中断' : data?.runtime?.status !== 'running' ? '服务未正常运行' : !clockKnown ? '采样时间未提供' : stale ? '采样已过期' : market?.gap || !['ready','ok','running','live','live_indicative','synthetic'].includes(market?.source_status) || ['market_gap','entry_paused'].includes(s.phase) ? '行情受限' : reference && !reference.usable ? '参考报价不可用' : '';
+    const basis = frozen ? `采样值 · ${frozen}，暂停推算` : '倒计时估算 · 开仓以策略采样为准';
+    const result = {percent:null, remaining:null, total:null, basis:frozen ? basis : '开仓条件以末次采样为准', frozen:!!frozen};
+    // An active order still carries the previous entry timestamp; it is not the next cooldown.
+    if (Number(s.active_entries) > 0 || ['opening','awaiting_fill','cancel_pending'].includes(s.phase)) {
+      return {...result, mode:'order', value:'处理中', detail:'开仓单成交或撤单确认后，再计算下一轮冷却'};
+    }
+    if (s.cooldown_waived === true) return {...result, mode:'waived', percent:100, value:'免等待', detail:'本轮已跳过冷却，仍需满足其他开仓条件'};
+    if (s.next_entry_at === null && valid(s.cooldown_remaining_seconds) && Number(s.cooldown_remaining_seconds) === 0) {
+      return {...result, mode:'first', percent:100, value:'首次开仓', detail:'首次无需冷却，等待策略检查开仓条件'};
+    }
+    if (!valid(s.cooldown_seconds) || !valid(s.cooldown_remaining_seconds) || Number(s.cooldown_seconds) < 0 || (Number(s.cooldown_seconds) === 0 && Number(s.cooldown_remaining_seconds) > 0)) {
+      return {...result, mode:'unknown', value:'—', detail:'等待有效冷却数据'};
+    }
+    const total = Number(s.cooldown_seconds);
+    const remaining = Math.min(total, Math.max(0, Number(s.cooldown_remaining_seconds) - (frozen ? 0 : age)));
+    const progress = total === 0 ? 100 : (1 - remaining / total) * 100;
+    // Never round an unfinished cooldown up to 100% or its remaining time down to zero.
+    const shownPercent = remaining === 0 ? 100 : Math.floor(progress * 10) / 10;
+    return {...result, mode:'timed', percent:shownPercent, remaining, total, basis, value:percent(shownPercent,1),
+      detail:remaining > 0 ? `剩余 ${seconds(Math.ceil(remaining * 10) / 10)} / 本轮 ${seconds(total)}` : '冷却已到，等待下一次采样检查开仓条件'};
+  }
   function encoding(row) {
     return {color:Math.max(0, [.05, .1, .2].indexOf(Number(row?.grid_step_percent))), dash:Math.max(0, [0, 2, 5].indexOf(Number(row?.hedge_tolerance_percent)))};
   }
@@ -103,12 +134,13 @@
     if (row?.pricing_mode === 'shared_indicative_v1') return `${row.cache_used ? '缓存参考价估算' : '共享参考价估算'} · 报价龄 ${M.number(row.quote_age_seconds, 1)} 秒 · 源数量 ${M.number(row.source_qty, 6)}${row.half_spread_percent == null ? '' : ' · 半点差 ' + percent(row.half_spread_percent, 4)}`;
     return row?.venue === 'Variational' ? '原精确数量报价' : row?.maker_model === scalperModel ? '剥头皮 · 严格 Maker 队列模拟' : 'Maker 队列模拟';
   }
-  const helpers = {percent, label, isScalper, seconds, scalperStatus, fillReason, encoding, reconciliation, sampleIndex, exposureDomain, dollarExposureDomain, dollarHedge, hedgeLimit, historyValue, freshness, marketStatus, hedgeStatus, cooldownNotice, referenceStatus, fillPricing};
+  const helpers = {percent, label, isScalper, seconds, scalperStatus, entryProgress, fillReason, encoding, reconciliation, sampleIndex, exposureDomain, dollarExposureDomain, dollarHedge, hedgeLimit, historyValue, freshness, marketStatus, hedgeStatus, cooldownNotice, referenceStatus, fillPricing};
   if (typeof module !== 'undefined' && module.exports) {module.exports = helpers; return;}
   root.QQQModel = helpers;
   const $ = id => document.getElementById(id), E = M.escape;
   let data = null, state = M.state(location.search, []), page = 0, selectedTs = null;
   let timer = null, controller = null, disconnected = false, received = 0, serverAge = 0;
+  let progressReceived = 0;
   let resetSending = false, resetError = '', resetGeneration = null;
   const allRows = () => data?.summary?.scenarios || [];
   const names = () => allRows().map(r => r.name);
@@ -157,6 +189,21 @@
     else if (s?.market?.source_reason) notice = sourceReason(s.market.source_reason);
     else if (s && !data.details_available) notice = '汇总可用，对应仓位或成交明细暂不可用。';
     $('notice').textContent = notice; $('notice').hidden = !notice;
+    updateEntryProgress();
+  }
+  function updateEntryProgress() {
+    const elapsed = Math.max(0, (performance.now() - progressReceived) / 1000);
+    for (const node of $('strategies').querySelectorAll('[data-entry-progress]')) {
+      const row = allRows()[Number(node.dataset.entryProgress)], p = entryProgress(row, data, elapsed, disconnected);
+      if (!p) continue;
+      node.classList.toggle('frozen', p.frozen);
+      node.classList.toggle('inactive', p.percent === null);
+      node.querySelector('.entry-progress-fill').setAttribute('width', p.percent ?? 0);
+      for (const key of ['value','detail','basis']) {
+        const target = node.querySelector('[data-progress-' + key + ']');
+        if (target.textContent !== p[key]) target.textContent = p[key];
+      }
+    }
   }
   function renderOverview() {
     const s = data?.summary, market = s?.market, scalper = isScalper(s);
@@ -179,11 +226,13 @@
       return;
     }
     $('experiment-info').textContent = `${allRows().length} 个独立账户 · ${scalper ? '最多 ' : ''}${M.number(s.parameters?.grid_count ?? 30, 0)} ${scalper ? '批 × 每批' : '格 × 每格'} ${M.number(s.parameters?.order_notional_usdc ?? 1000, 0)} USDC · ${M.number(s.sample_count, 0)} 次共同采样${scalper ? ' · 开仓条件为末次采样状态' : ''}`;
-    $('strategies').innerHTML = allRows().map(r => {
+    const focusedStrategy = document.activeElement?.dataset?.strategy;
+    $('strategies').innerHTML = allRows().map((r, i) => {
       const entry = scalperStatus(r);
-      const entryPanel = entry ? `<div class="entry-state"><strong class="${entry.pending ? 'pending' : ''}">采样时：${E(entry.phase)}</strong><span>${E(entry.waiting)} · ${E(entry.gate)}</span><span>${E(entry.orders)}</span><span>${E(entry.prices)}</span></div>` : '';
+      const entryPanel = entry ? `<div class="entry-state"><div class="entry-progress" data-entry-progress="${i}"><div class="entry-progress-head"><span>下一次开仓 · 冷却进度</span><b data-progress-value>—</b></div><svg class="entry-progress-track" viewBox="0 0 100 8" preserveAspectRatio="none" aria-hidden="true" focusable="false"><rect class="entry-progress-background" width="100" height="8" rx="4"/><rect class="entry-progress-fill" width="0" height="8" rx="4"/></svg><span class="entry-progress-detail" data-progress-detail>等待有效冷却数据</span><span class="entry-progress-basis" data-progress-basis></span></div><strong class="${entry.pending ? 'pending' : ''}">采样时：${E(entry.phase)}</strong><span>${E(entry.gate)} · ${E(entry.orders)}</span><span>${E(entry.prices)}</span></div>` : '';
       return `<button class="strategy ${cls(r)} ${state.strategy === r.name ? 'selected' : ''}" data-strategy="${E(r.name)}" aria-pressed="${state.strategy === r.name}"><div class="strategy-head"><h3>${entry ? '间距' : '网格'} ${percent(r.grid_step_percent, 2)}${entry ? ' / TP ' + percent(r.scalper.take_profit_percent,2) : ''}</h3><small>对冲阈值 ${hedgeLimit(r)}</small></div>${entryPanel}<span class="pnl-label">两腿累计净收益</span><strong class="big-pnl ${M.tone(r.total_pnl_usdc)}">${M.signed(r.total_pnl_usdc, 2)}<small>USDC</small></strong><div class="leg-pnls"><span>QQQ <b>${pnl(r.qqq?.total_pnl_usdc)}</b></span><span>US100 <b>${pnl(r.us100?.total_pnl_usdc)}</b></span></div><div class="strategy-stats"><div><span>${dollarHedge(r) ? '绝对净敞口 / 对冲阈值' : '实际敞口 / 容忍阈值'}</span><b>${dollarHedge(r) ? M.number(Math.abs(Number(r.net_exposure_usdc)),2) : percent(r.exposure_percent)} / ${hedgeLimit(r)}</b></div><div><span>净 / 总敞口（USDC）</span><b>${M.signed(r.net_exposure_usdc, 2)} / ${M.number(r.gross_exposure_usdc, 2)}</b></div><div><span>${entry ? '本档冷却' : '持仓格 / 待成交单'}</span><b>${entry ? E(seconds(r.scalper.cooldown_seconds)) : M.number(r.open_slots, 0) + ' / ' + M.number(r.resting_orders, 0)}</b></div><div><span>最大回撤 / USDC</span><b>${M.number(r.max_drawdown_usdc, 2)}</b></div></div><p class="control-status ${r.hedge_pending ? 'pending' : ''}">${E(hedgeStatus(r))}${reconciliation(r) === false ? ' · 两腿损益核对异常' : ''}</p></button>`;
     }).join('');
+    if (focusedStrategy) Array.from($('strategies').children).find(node => node.dataset.strategy === focusedStrategy)?.focus({preventScroll:true});
     const values = allRows().map(r => r.total_pnl_usdc), total = values.every(M.finite) ? values.reduce((sum, value) => sum + Number(value), 0) : null;
     $('account-total').textContent = `${allRows().length} 账户净收益合计 ${M.signed(total, 2)} USDC · 仅为独立实验账户相加，不代表一个账户的收益率。`;
   }
@@ -322,7 +371,7 @@
       if (request !== controller || document.hidden) return;
       if (next.summary && (next.summary.kind !== 'qqq_hedge' || !Array.isArray(next.summary.scenarios))) throw new Error('Unexpected dashboard payload');
       if (data?.reset?.generation !== next.reset?.generation) {selectedTs = null; page = 0;}
-      data = next; received = Date.now();
+      data = next; received = Date.now(); progressReceived = performance.now();
       serverAge = data.summary ? Math.max(0, (M.finite(data.server_ts) ? Number(data.server_ts) : received / 1000) - Number(data.summary.ts)) : 0;
       disconnected = false;
       if (data.summary) state = M.state(location.search, names());

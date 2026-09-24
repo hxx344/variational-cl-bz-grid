@@ -376,7 +376,7 @@ curl -fsSL https://raw.githubusercontent.com/hxx344/variational-cl-bz-grid/main/
 ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=6 -L 127.0.0.1:18765:127.0.0.1:9876 USER@SERVER_IP
 ```
 
-浏览器打开 [监控页](http://127.0.0.1:18765/)。各账户图表、两腿损益与成交量分别显示；新三组的敞口图单位为USDC，阈值线为±3000，旧百分比实验保持原单位。剥头皮卡片显示采样时的开仓阶段、冷却剩余、价格条件、开仓单和独立止盈单数量、占用批次及候选价格；服务停止时等待值保持最后采样值。
+浏览器打开 [监控页](http://127.0.0.1:18765/)。各账户图表、两腿损益与成交量分别显示；新三组的敞口图单位为USDC，阈值线为±3000，旧百分比实验保持原单位。剥头皮卡片显示下一次开仓的冷却进度、百分比与剩余秒数，按各组当前档位的总等待时间计算，正常运行时每秒推算，无额外行情请求。100%仅表示冷却已到，实际开仓仍需策略采样确认价格距离、批次容量和行情条件；已有开仓单时显示处理中，不套用上一轮冷却。行情过期、服务停止或页面断连时恢复最后采样值并标注暂停推算。卡片同时保留采样时的开仓阶段、价格条件、开仓单和独立止盈单数量、占用批次及候选价格。
 
 ```bash
 python -m variational_grid compare --experiments qqq-hedge.example.json
