@@ -384,7 +384,7 @@ import json, sys
 from pathlib import Path
 data = json.loads(Path(sys.argv[1]).read_text())
 data['session_file'] = '/var/lib/variational-grid/session.json'
-data['state_file'] = '/var/lib/variational-grid/paper-unlimited-margin.sqlite3'
+data['state_file'] = '/var/lib/variational-grid/paper-unbounded-grid-100x.sqlite3'
 Path(sys.argv[2]).write_text(json.dumps(data, indent=2) + '\n')
 PY
   chmod 644 "$conf/config.json"
@@ -395,7 +395,7 @@ import json, sys
 from pathlib import Path
 data = json.loads(Path(sys.argv[1]).read_text())
 data['base_config'] = '/etc/variational-grid/config.json'
-data['output_dir'] = '/var/lib/variational-grid/comparison-pct-05-1-2-range30-center3d-unlimited-margin'
+data['output_dir'] = '/var/lib/variational-grid/comparison-pct-05-1-2-center3d-unbounded-grid-100x'
 Path(sys.argv[2]).write_text(json.dumps(data, indent=2) + '\n')
 PY
   chmod 644 "$conf/experiments.json"
@@ -444,7 +444,7 @@ fi
 (cd "$release" && python3 - "$mode" "$conf" <<'PY'
 import sys
 from pathlib import Path
-from variational_grid.migration import upgrade_center, upgrade_margin_limit
+from variational_grid.migration import upgrade_center, upgrade_margin_limit, upgrade_unbounded_grid
 comparison = sys.argv[1] == 'compare'
 path = Path(sys.argv[2]) / ('experiments.json' if comparison else 'config.json')
 backup = upgrade_center(path, comparison=comparison)
@@ -457,6 +457,11 @@ if backup:
     print(f'Removed paper position/margin budget; grid levels and drawdown rules preserved. A new simulation will start. Old settings: {backup}; old ledgers preserved.')
 else:
     print('Position budget settings unchanged; skipping margin migration.')
+backup = upgrade_unbounded_grid(path, comparison=comparison)
+if backup:
+    print(f'Updated to unlimited grid levels and 100x paper leverage; position/margin budgets disabled. Old settings: {backup}; old ledgers preserved in a separate run.')
+else:
+    print('Grid/leverage settings unchanged; skipping unbounded-grid migration.')
 PY
 )
 settings_key=$({

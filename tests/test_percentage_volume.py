@@ -135,11 +135,12 @@ class PercentageVolumeTests(unittest.TestCase):
         with Cohort(experiment) as cohort:
             rows = cohort.ingest(Frame(ts, ts, D(4), {"1": quotes("4.06", ts)}))["scenarios"]
             self.assertEqual([r["grid_step_percent"] for r in rows], ["0.5", "1", "2"])
-            self.assertEqual([r["max_levels"] for r in rows], [60, 30, 15])
+            self.assertEqual([r["max_levels"] for r in rows], [None, None, None])
             for row in rows:
-                self.assertEqual(D(row["grid_range_percent"]), D(30))
-                self.assertEqual(D(row["grid_span_percent"]), D(60))
-                self.assertEqual((D(row["grid_lower"]), D(row["grid_upper"])), (D("2.8"), D("5.2")))
+                self.assertFalse(row["grid_limit_enabled"])
+                self.assertIsNone(row["grid_range_percent"])
+                self.assertIsNone(row["grid_upper"])
+                self.assertEqual(row['paper_leverage'],'100')
             self.assertEqual([r["volume_barrels"] for r in rows], ["2", "2", "0"])
             self.assertEqual([r["fill_count"] for r in rows], [2, 2, 0])
             dashboard = read_dashboard(experiment)

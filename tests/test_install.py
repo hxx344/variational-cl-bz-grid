@@ -249,7 +249,8 @@ if name == "runuser":
         self.assertEqual((self.app / "current").resolve().name, self.revision)
         experiments = json.loads((self.conf / "experiments.json").read_text())
         self.assertEqual([s["overrides"]["grid_step_percent"] for s in experiments["scenarios"]], ["0.5", "1", "2"])
-        self.assertEqual([s["overrides"]["max_levels"] for s in experiments["scenarios"]], [60, 30, 15])
+        self.assertEqual([s["overrides"]["max_levels"] for s in experiments["scenarios"]], [None, None, None])
+        self.assertTrue(all(s['overrides']['paper_leverage']=='100' for s in experiments['scenarios']))
         config = json.loads((self.conf / "config.json").read_text())
         self.assertIsNone(config['max_margin_fraction'])
         self.assertTrue(all(s['overrides']['max_margin_fraction'] is None for s in experiments['scenarios']))
@@ -318,8 +319,8 @@ if name == "runuser":
         self.assertEqual(sentinel.read_bytes(), b'original data')
         updated = json.loads(path.read_text())
         self.assertEqual([s['overrides']['grid_step_percent'] for s in updated['scenarios']], ['0.5', '1', '2'])
-        self.assertEqual(updated['output_dir'], str(self.state / 'comparison-pct-05-1-2-range30'))
-        self.assertEqual([s['overrides']['max_levels'] for s in updated['scenarios']], [60, 30, 15])
+        self.assertEqual(updated['output_dir'], str(self.state / 'comparison-pct-05-1-2-range30-unbounded-grid-100x'))
+        self.assertEqual([s['overrides']['max_levels'] for s in updated['scenarios']], [None, None, None])
         self.log.write_text('')
         self.install('--compare')
         self.assertEqual(self.restarts(), [])
@@ -409,7 +410,7 @@ if name == "runuser":
         updated = json.loads(path.read_text())
         self.assertEqual(updated['output_dir'], str(old_output) + '-unlimited-margin')
         self.assertTrue(all(r['overrides']['max_margin_fraction'] is None for r in updated['scenarios']))
-        self.assertEqual([r['overrides']['max_levels'] for r in updated['scenarios']], [60, 30, 15])
+        self.assertEqual([r['overrides']['max_levels'] for r in updated['scenarios']], [None, None, None])
         self.assertEqual((self.conf / 'experiments.before-unlimited-margin.json').read_bytes(), original_spec)
         self.assertEqual((self.conf / 'config.before-unlimited-margin.json').read_bytes(), original_config)
         self.assertIsNone(json.loads(config_path.read_text())['max_margin_fraction'])
@@ -431,16 +432,66 @@ if name == "runuser":
         spec = json.loads(path.read_text())
         spec['output_dir'] = str(self.state / 'comparison-pct-05-1-2')
         for row in spec['scenarios']:
-            row['overrides'].pop('max_levels')
+            row['overrides']['max_levels'] = 8
         path.write_text(json.dumps(spec))
         original = path.read_bytes()
         self.install('--compare')
         self.assertEqual((self.conf / 'experiments.before-range30.json').read_bytes(), original)
         updated = json.loads(path.read_text())
-        self.assertEqual([s['overrides']['max_levels'] for s in updated['scenarios']], [60, 30, 15])
+        self.assertEqual([s['overrides']['max_levels'] for s in updated['scenarios']], [None, None, None])
         self.log.write_text('')
         self.install('--compare')
         self.assertEqual(self.restarts(), [])
+
+    def check_unbounded_upgrade_order(self, first, second):
+        self.install()
+        config_path = self.conf / 'config.json'
+        config = json.loads(config_path.read_text())
+        old_state = self.state / 'paper-unlimited-margin.sqlite3'
+        old_state.write_bytes(b'old capped single ledger')
+        config.update(max_levels=30, paper_leverage='5', state_file=str(old_state))
+        config_path.write_text(json.dumps(config))
+        original_config = config_path.read_bytes()
+        path = self.conf / 'experiments.json'
+        spec = json.loads(path.read_text())
+        old_output = self.state / 'comparison-range30-center3d-unlimited-margin'
+        old_output.mkdir()
+        spec['output_dir'] = str(old_output)
+        for row in spec['scenarios']:
+            row['overrides'].pop('max_levels')
+            row['overrides'].pop('paper_leverage')
+        manifest = old_output / 'experiment.json'
+        manifest.write_text(json.dumps({'scenarios': {r['name']: {'center_hours':72, 'max_levels':30,
+                                    'paper_leverage':'5', 'max_margin_fraction':None} for r in spec['scenarios']}}))
+        original_manifest = manifest.read_bytes()
+        path.write_text(json.dumps(spec))
+        original_spec = path.read_bytes()
+        for mode in (first,second):
+            result = self.install(mode)
+            self.assertIn('Updated to unlimited grid levels and 100x paper leverage',result.stdout)
+        updated = json.loads(path.read_text())
+        self.assertEqual(updated['output_dir'],str(old_output)+'-unbounded-grid-100x')
+        self.assertTrue(all(r['overrides']['max_levels'] is None and r['overrides']['paper_leverage']=='100'
+                            and r['overrides']['max_margin_fraction'] is None for r in updated['scenarios']))
+        self.assertEqual((self.conf/'experiments.before-unbounded-grid-100x.json').read_bytes(),original_spec)
+        self.assertEqual((self.conf/'config.before-unbounded-grid-100x.json').read_bytes(),original_config)
+        self.assertEqual(old_state.read_bytes(),b'old capped single ledger')
+        self.assertEqual(manifest.read_bytes(),original_manifest)
+        updated['scenarios'][0]['overrides'].update(max_levels=6, paper_leverage='25', max_margin_fraction='0.5')
+        path.write_text(json.dumps(updated))
+        # Apply the deliberate customization once, then a repeated install must do nothing.
+        self.install('--compare')
+        preserved = path.read_bytes()
+        self.log.write_text('')
+        self.install('--compare')
+        self.assertEqual(path.read_bytes(),preserved)
+        self.assertEqual(self.restarts(),[])
+
+    def test_unbounded_single_then_compare_uses_saved_identity(self):
+        self.check_unbounded_upgrade_order('--single','--compare')
+
+    def test_unbounded_compare_then_single_keeps_both_ledgers(self):
+        self.check_unbounded_upgrade_order('--compare','--single')
 
     def test_help_and_bad_arguments_do_not_change_the_system(self):
         help_result = self.install("--help")

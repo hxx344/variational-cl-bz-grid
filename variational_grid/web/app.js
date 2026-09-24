@@ -4,6 +4,7 @@
   const M = window.GridModel, $ = id => document.getElementById(id), E = M.escape;
   let data = null, state = M.state(location.search, []), page = 0, selectedTs = null;
   let timer = null, controller = null, disconnected = false, received = 0, serverAge = 0;
+  const gridPages = new Map();
   const names = () => data?.summary?.scenarios.map(r => r.name) || [];
   const index = name => Math.max(0, names().indexOf(name));
   const cls = name => `c${index(name) % 4}`;
@@ -50,7 +51,7 @@
       $('strategy-select').innerHTML='<option value="all">全部策略</option>';
       return;
     }
-    $('strategies').innerHTML = rows.map(r => `<button class="strategy ${cls(r.name)} ${state.strategy === r.name ? 'selected' : ''}" data-strategy="${E(r.name)}" aria-pressed="${state.strategy === r.name}" aria-label="查看${E(label(r))}策略"><div class="strategy-head"><h3>${E(label(r))}</h3><span class="step">持仓 ${r.open_pairs} 组 · 每侧 ${r.max_levels} 层</span></div><p class="grid-conversion">当前一格 ${M.number(r.grid_step,6)} USDC/桶</p><p class="grid-range">${E(M.rangeLabel(r))}<span>${M.number(r.grid_lower,4)} ～ ${M.number(r.grid_upper,4)} USDC/桶</span></p><span class="pnl-label">累计损益 / USDC</span><strong class="big-pnl ${M.tone(r.total_pnl_usdc)}">${M.signed(r.total_pnl_usdc)}<small>USDC</small></strong><div class="strategy-stats"><div><label>已实现</label><b class="${M.tone(r.realized_pnl_usdc)}">${M.signed(r.realized_pnl_usdc)}</b></div><div><label>持仓浮盈亏</label><b class="${M.tone(Number(r.total_pnl_usdc)-Number(r.realized_pnl_usdc))}">${M.signed(Number(r.total_pnl_usdc)-Number(r.realized_pnl_usdc))}</b></div><div><label>最大回撤</label><b>${M.number(Number(r.max_drawdown_fraction)*100,3)}%</b></div></div><div class="volume-stats"><div><label>累计成交额 / USDC</label><b>${M.number(r.turnover_usdc,2)}</b></div><div><label>累计成交量 / 桶</label><b>${M.number(r.volume_barrels,3)}</b></div></div><div class="position-limits"><span>双腿持仓金额 / 开仓额度</span><b>${M.number(r.position_notional_usdc,2)} USDC / ${E(M.limitLabel(r))}</b><small>保证金估算 ${M.number(r.margin_usdc,2)} USDC · ${E(M.limitLabel(r,'margin_limit_usdc'))}</small></div><div class="mini-stats"><span>权益 <b>${M.number(r.equity_usdc,2)}</b></span><span>已平仓 <b>${r.closed_pairs} 组</b></span></div></button>`).join('');
+    $('strategies').innerHTML = rows.map(r => `<button class="strategy ${cls(r.name)} ${state.strategy === r.name ? 'selected' : ''}" data-strategy="${E(r.name)}" aria-pressed="${state.strategy === r.name}" aria-label="查看${E(label(r))}策略"><div class="strategy-head"><h3>${E(label(r))}</h3><span class="step">持仓 ${r.open_pairs} 组 · ${E(M.levelLabel(r))}</span></div><p class="grid-conversion">当前一格 ${M.number(r.grid_step,6)} USDC/桶</p><p class="grid-range">${E(M.rangeLabel(r))}<span>${E(M.boundsLabel(r))}</span></p><span class="pnl-label">累计损益 / USDC</span><strong class="big-pnl ${M.tone(r.total_pnl_usdc)}">${M.signed(r.total_pnl_usdc)}<small>USDC</small></strong><div class="strategy-stats"><div><label>已实现</label><b class="${M.tone(r.realized_pnl_usdc)}">${M.signed(r.realized_pnl_usdc)}</b></div><div><label>持仓浮盈亏</label><b class="${M.tone(Number(r.total_pnl_usdc)-Number(r.realized_pnl_usdc))}">${M.signed(Number(r.total_pnl_usdc)-Number(r.realized_pnl_usdc))}</b></div><div><label>最大回撤</label><b>${M.number(Number(r.max_drawdown_fraction)*100,3)}%</b></div></div><div class="volume-stats"><div><label>累计成交额 / USDC</label><b>${M.number(r.turnover_usdc,2)}</b></div><div><label>累计成交量 / 桶</label><b>${M.number(r.volume_barrels,3)}</b></div></div><div class="position-limits"><span>双腿持仓金额 / 开仓额度</span><b>${M.number(r.position_notional_usdc,2)} USDC / ${E(M.limitLabel(r))}</b><small>保证金估算 ${M.number(r.margin_usdc,2)} USDC · ${E(M.limitLabel(r,'margin_limit_usdc'))} · ${M.number(r.paper_leverage,0)} 倍</small></div><div class="mini-stats"><span>权益 <b>${M.number(r.equity_usdc,2)}</b></span><span>已平仓 <b>${r.closed_pairs} 组</b></span></div></button>`).join('');
     $('strategy-select').innerHTML = '<option value="all">全部策略</option>' + rows.map(r => `<option value="${E(r.name)}">${E(label(r))}</option>`).join('');
     $('strategy-select').value = state.strategy;
     const s = data.summary;
@@ -124,12 +125,14 @@
     if(data?.summary && !data.details_available) { $('grid-map').innerHTML='<div class="empty">网格明细暂不可用，请参考上方已保存的持仓组数。</div>'; return; }
     $('grid-map').innerHTML=scenarios().map(r=>{
       const lots=(data.positions||[]).filter(p=>p.scenario===r.name), slots=[];
-      for(let level=1;level<=r.max_levels;level++) {
-        const lot=lots.find(l=>l.level===level);
+      const window=M.gridWindow(r,lots,gridPages.get(r.name)), occupied=new Map(lots.map(lot=>[lot.level,lot]));
+      gridPages.set(r.name,window.page);
+      for(let level=window.start;level<=window.end;level++) {
+        const lot=occupied.get(level);
         const title=lot?`第 ${level} 格，${lot.direction===1?'CL 空 / BZ 多':'CL 多 / BZ 空'}，每腿 ${lot.qty} 桶`:`第 ${level} 格，空闲${r.grid_step_percent != null ? `，距中枢 ${Number(r.grid_step_percent)*level}%` : ''}`;
         slots.push(`<button class="slot ${lot?'occupied':''}" data-slot-scenario="${E(r.name)}" ${lot?'':'disabled'} aria-label="${E(title)}" title="${E(title)}">${level}</button>`);
       }
-      return `<div class="grid-row ${cls(r.name)}"><div class="grid-name">${E(label(r))}<span>每侧 ${r.max_levels} 层 · 持仓 ${lots.length} 组 · 每腿 ${M.number(r.quantity_barrels,2)} 桶</span></div><div class="slots">${slots.join('')}</div><span class="slot-caption">CL ${Number(r.cl_barrels)>=0?'多':'空'} ${M.number(Math.abs(Number(r.cl_barrels)),2)} 桶 / BZ ${Number(r.bz_barrels)>=0?'多':'空'} ${M.number(Math.abs(Number(r.bz_barrels)),2)} 桶</span></div>`;
+      return `<div class="grid-row ${cls(r.name)}"><div class="grid-name">${E(label(r))}<span>${E(M.levelLabel(r))} · 持仓 ${lots.length} 组 · 每腿 ${M.number(r.quantity_barrels,2)} 桶</span></div><div class="grid-window"><div class="slots">${slots.join('')}</div><div class="grid-paging"><span>显示第 ${window.start}–${window.end} 格 · 最高持仓格 ${window.highest || '—'}</span>${window.pages>1?`<button class="button outline" data-grid-scenario="${E(r.name)}" data-grid-page="${window.page-1}" ${window.page===0?'disabled':''} aria-label="${E(label(r))} 上一段格位">上一段</button><button class="button outline" data-grid-scenario="${E(r.name)}" data-grid-page="${window.page+1}" ${window.page===window.pages-1?'disabled':''} aria-label="${E(label(r))} 下一段格位">下一段</button>`:''}</div></div><span class="slot-caption">CL ${Number(r.cl_barrels)>=0?'多':'空'} ${M.number(Math.abs(Number(r.cl_barrels)),2)} 桶 / BZ ${Number(r.bz_barrels)>=0?'多':'空'} ${M.number(Math.abs(Number(r.bz_barrels)),2)} 桶</span></div>`;
     }).join('') || '<div class="empty">尚无网格数据</div>';
   }
 
@@ -152,8 +155,8 @@
     $('detail-content').setAttribute('aria-labelledby','tab-'+state.view);
     $('export').hidden=!isTrades; $('export').disabled=!trades.length;
     if(state.view==='parameters') {
-      $('detail-content').innerHTML='<div class="table-wrap" tabindex="0" aria-label="参数对照表"><table class="parameters-table"><thead><tr><th>策略</th><th>当前一格 / USDC/桶</th><th>覆盖范围</th><th>初始资金 / USDC</th><th>每腿桶数</th><th>每侧网格层数</th><th>杠杆估算</th><th>手续费 / 滑点 bp</th><th>最长持仓</th><th>状态</th></tr></thead><tbody>'+scenarios().map(r=>`<tr><td class="row-name ${cls(r.name)}">${E(label(r))}</td><td>${M.number(r.grid_step,6)}</td><td>${E(M.rangeLabel(r))}<span class="secondary">${M.number(r.grid_lower,4)} ～ ${M.number(r.grid_upper,4)} USDC/桶</span></td><td>${M.number(r.initial_balance_usdc,2)}</td><td>${M.number(r.quantity_barrels,3)}</td><td>${r.max_levels}</td><td>${M.number(r.paper_leverage,1)} 倍</td><td>${M.number(r.fee_bps,1)} / ${M.number(r.slippage_bps,1)}</td><td>${r.max_holding_hours ?? '—'} 小时</td><td>${r.halted?'回撤停机':r.skip_reason==='zero_center'?'中枢为零，暂停开仓':r.open_allowed?'正常':'只减仓'}</td></tr>`).join('')+'</tbody></table></div>';
-      $('pagination').hidden=true; $('detail-note').textContent='百分比基于所选窗口平均价差中枢的绝对值。当前一格随中枢更新；每笔净止盈目标按开仓时的一格固定。中枢为零时暂停开仓。层数按覆盖范围配置，金额不限时保证金仅作估算，开仓仍受网格层数与回撤规则约束。'; return;
+      $('detail-content').innerHTML='<div class="table-wrap" tabindex="0" aria-label="参数对照表"><table class="parameters-table"><thead><tr><th>策略</th><th>当前一格 / USDC/桶</th><th>覆盖范围</th><th>初始资金 / USDC</th><th>每腿桶数</th><th>每侧网格层数</th><th>杠杆估算</th><th>手续费 / 滑点 bp</th><th>最长持仓</th><th>状态</th></tr></thead><tbody>'+scenarios().map(r=>`<tr><td class="row-name ${cls(r.name)}">${E(label(r))}</td><td>${M.number(r.grid_step,6)}</td><td>${E(M.rangeLabel(r))}<span class="secondary">${E(M.boundsLabel(r))}</span></td><td>${M.number(r.initial_balance_usdc,2)}</td><td>${M.number(r.quantity_barrels,3)}</td><td>${E(M.levelLabel(r))}</td><td>${M.number(r.paper_leverage,1)} 倍</td><td>${M.number(r.fee_bps,1)} / ${M.number(r.slippage_bps,1)}</td><td>${r.max_holding_hours ?? '—'} 小时</td><td>${r.halted?'回撤停机':r.skip_reason==='zero_center'?'中枢为零，暂停开仓':r.open_allowed?'正常':'只减仓'}</td></tr>`).join('')+'</tbody></table></div>';
+      $('pagination').hidden=true; $('detail-note').textContent='百分比基于所选窗口平均价差中枢的绝对值。当前一格随中枢更新；每笔净止盈目标按开仓时的一格固定。中枢为零时暂停开仓。无限模式按价差继续扩展格位，每格一组；保证金仅作估算。回撤与最长持仓规则仍然有效。'; return;
     }
     const rows=isTrades?trades:positions, size=15, pages=Math.max(1,Math.ceil(rows.length/size));
     page=Math.min(page,pages-1);
@@ -187,7 +190,7 @@
       if(!response.ok) throw new Error('HTTP '+response.status);
       const next=await response.json();
       if(request!==controller) return;
-      if(data?.reset?.generation !== next.reset?.generation) {selectedTs=null;page=0;}
+      if(data?.reset?.generation !== next.reset?.generation) {selectedTs=null;page=0;gridPages.clear();}
       data=next; received=Date.now(); serverAge=data.summary?data.server_ts-data.summary.ts:0; disconnected=false;
       // Preserve URL state while waiting for the first published sample.
       if(data.summary) state=M.state(location.search,names());
@@ -244,6 +247,12 @@
   $('sample').oninput=event=>{selectedTs=data.history.points[Number(event.target.value)]?.ts ?? null;renderCharts();};
   $('previous').onclick=()=>{page--;renderDetails();}; $('next').onclick=()=>{page++;renderDetails();};
   document.addEventListener('click',event=>{
+    const gridPage=event.target.closest('[data-grid-page]');
+    if(gridPage && !gridPage.disabled) {
+      const name=gridPage.dataset.gridScenario, direction=gridPage.textContent;
+      gridPages.set(name,Number(gridPage.dataset.gridPage));renderGrid();
+      Array.from(document.querySelectorAll('[data-grid-page]')).find(b=>b.dataset.gridScenario===name && b.textContent===direction)?.focus();
+    }
     const strategy=event.target.closest('[data-strategy]');
     if(strategy) setState({strategy:strategy.dataset.strategy});
     const range=event.target.closest('[data-range]');

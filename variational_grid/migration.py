@@ -11,6 +11,7 @@ from .models import GridError, dec
 
 LEGACY = {"step-0.15": ("0.15", "0.5"), "step-0.20": ("0.20", "1"), "step-0.25": ("0.25", "2")}
 PERCENT = {"step-0.5pct": "0.5", "step-1pct": "1", "step-2pct": "2"}
+UNBOUNDED_VERSION = "-unbounded-grid-100x"
 
 
 def upgrade_experiment(path):
@@ -21,7 +22,7 @@ def upgrade_experiment(path):
     names = {r.get("name") for r in rows}
     old_output = Path(data["output_dir"])
     # This version already applied; preserve subsequent user edits on repeated installs.
-    if old_output.name.removesuffix("-unlimited-margin").endswith(("-range30", "-range30-center3d")):
+    if old_output.name.endswith(UNBOUNDED_VERSION) or old_output.name.removesuffix("-unlimited-margin").endswith(("-range30", "-range30-center3d")):
         return None
     absolute = names == set(LEGACY)
     if len(rows) != 3 or not (absolute or names == set(PERCENT)):
@@ -36,7 +37,7 @@ def upgrade_experiment(path):
         if not matches:
             return None
     previous = Experiment.load(path)
-    if not absolute and all(dec(c.grid_step_percent) * c.max_levels == 30 for c in previous.scenarios.values()):
+    if not absolute and all(c.max_levels is None or dec(c.grid_step_percent) * c.max_levels == 30 for c in previous.scenarios.values()):
         return None
     # Keep quantity, capital and costs; change the requested grid geometry only.
     for row in rows:
@@ -138,7 +139,7 @@ def upgrade_margin_limit(path, *, comparison=True):
     old = Path(data[key])
     marker = "-unlimited-margin"
     # The versioned path also protects deliberate later changes, including a new cap.
-    if (old.name if comparison else old.stem).endswith(marker):
+    if (old.name if comparison else old.stem).endswith((marker, UNBOUNDED_VERSION)):
         return None
     configs = current.scenarios.values() if comparison else [current]
     limited = any(c.max_margin_fraction is not None for c in configs)
@@ -171,6 +172,75 @@ def upgrade_margin_limit(path, *, comparison=True):
     if backup.exists() and backup.read_bytes() != original:
         raise GridError("Unlimited-margin backup already contains different settings")
     handle, temporary = tempfile.mkstemp(prefix=".margin-upgrade-", suffix=".json", dir=path.parent)
+    temporary = Path(temporary)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump(data, stream, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        (Experiment.load if comparison else configuration)(temporary)
+        if not backup.exists():
+            with backup.open("xb") as stream:
+                stream.write(original)
+                stream.flush()
+                os.fsync(stream.fileno())
+            backup.chmod(path.stat().st_mode & 0o777)
+        temporary.chmod(path.stat().st_mode & 0o777)
+        os.replace(temporary, path)
+        return backup
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def upgrade_unbounded_grid(path, *, comparison=True):
+    """Version unlimited grid depth and 100x margin estimates without mixing ledgers."""
+    from .cli import configuration
+    path = Path(path).resolve()
+    original = path.read_bytes()
+    data = json.loads(original.decode("utf-8-sig"))
+    current = Experiment.load(path) if comparison else configuration(path)
+    key = "output_dir" if comparison else "state_file"
+    old = Path(data[key])
+    if (old.name if comparison else old.stem).endswith(UNBOUNDED_VERSION):
+        return None
+
+    def legacy(identity):
+        return (identity.get("max_levels", 8) is not None
+                or identity.get("max_margin_fraction", "0.80") is not None
+                or dec(identity.get("paper_leverage", "5")) != 100)
+
+    configs = current.scenarios.values() if comparison else [current]
+    changed = any(legacy(json.loads(c.strategy_identity())) for c in configs)
+    # Saved identities survive a single-mode change to the inherited base config.
+    if comparison:
+        manifest = current.output / "experiment.json"
+        if manifest.exists():
+            saved = json.loads(manifest.read_text(encoding="utf-8"))
+            changed |= any(legacy(c) for c in saved["scenarios"].values())
+    elif not changed and Path(current.state_file).exists():
+        try:
+            with closing(sqlite3.connect(Path(current.state_file).as_uri() + "?mode=ro", uri=True)) as db:
+                row = db.execute("SELECT value FROM meta WHERE key='config'").fetchone()
+                changed = row is not None and legacy(json.loads(row[0]))
+        except sqlite3.Error:
+            raise GridError("Cannot inspect saved paper strategy; configuration left unchanged") from None
+    if not changed:
+        return None
+    settings = {"max_levels": None, "paper_leverage": "100", "max_margin_fraction": None}
+    if comparison:
+        for row in data["scenarios"]:
+            row["overrides"].update(settings)
+    else:
+        data.update(settings)
+    new = old.with_name(old.name + UNBOUNDED_VERSION) if comparison else old.with_name(old.stem + UNBOUNDED_VERSION + old.suffix)
+    if (path.parent / new).resolve().exists():
+        raise GridError("Unbounded-grid target already exists; old data and configuration preserved")
+    data[key] = str(new)
+    backup = path.with_name(path.stem + ".before" + UNBOUNDED_VERSION + path.suffix)
+    if backup.exists() and backup.read_bytes() != original:
+        raise GridError("Unbounded-grid backup already contains different settings")
+    handle, temporary = tempfile.mkstemp(prefix=".unbounded-upgrade-", suffix=".json", dir=path.parent)
     temporary = Path(temporary)
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as stream:

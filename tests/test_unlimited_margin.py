@@ -42,7 +42,7 @@ class UnlimitedEngineTests(unittest.TestCase):
                         store.close()
 
     def test_unlimited_preserves_entry_drawdown_close_only_and_runtime_drawdown(self):
-        config = Config(grid_step_percent='0.5', max_levels=60, max_margin_fraction=None,
+        config = Config(grid_step_percent='0.5', max_levels=None, max_margin_fraction=None,
                         paper_balance_usdc='100', quantity_barrels='10', slippage_bps_per_leg='100')
         store = Store(':memory:', config)
         try:
@@ -181,6 +181,6 @@ class UnlimitedMigrationTests(unittest.TestCase):
                 self.assertFalse(row['margin_limit_enabled'])
                 self.assertIsNone(row['entry_notional_limit_usdc'])
                 self.assertGreater(D(row['position_notional_usdc']), 0)
-                self.assertEqual(D(row['position_notional_usdc']), D(row['margin_usdc']) * 5)
+                self.assertEqual(D(row['position_notional_usdc']), D(row['margin_usdc']) * 100)
             html = render_report(data['summary'], [], {'status': 'running'})
             self.assertEqual(html.count('金额不限'), 3)

@@ -46,7 +46,7 @@ class Config:
     grid_step_usdc_per_barrel: str = "0.20"
     # None preserves existing absolute-step configurations and ledger identities.
     grid_step_percent: str | None = None
-    max_levels: int = 8
+    max_levels: int | None = 8  # None extends the grid without a position-count cap.
     paper_leverage: str = "5"
     max_margin_fraction: str | None = "0.80"  # None disables the paper funding cap.
     max_drawdown_fraction: str = "0.20"
@@ -77,9 +77,11 @@ class Config:
                 raise GridError(f"{name} must be in [0, 1000)")
         for name in ("center_hours", "max_levels", "max_holding_hours", "poll_seconds", "max_quote_age_seconds", "max_pair_skew_seconds"):
             value = getattr(self, name)
+            if name == "max_levels" and value is None:
+                continue
             if type(value) is not int or value <= 0:
                 raise GridError(f"{name} must be a positive integer")
-        if self.max_levels > 100 or self.poll_seconds < 5:
+        if (self.max_levels is not None and self.max_levels > 100) or self.poll_seconds < 5:
             raise GridError("max_levels must be <= 100 and poll_seconds >= 5")
         if self.center_hours not in (72, 168):
             raise GridError("center_hours must be 72 (3 days) or 168 (legacy 7 days)")
@@ -116,9 +118,12 @@ class Config:
 
     def grid_geometry(self, center):
         center = dec(center)
+        if self.max_levels is None:
+            return {"grid_limit_enabled": False, "grid_range_percent": None,
+                    "grid_span_percent": None, "grid_lower": None, "grid_upper": None}
         distance = self.grid_step(center) * self.max_levels
         percent = dec(self.grid_step_percent) * self.max_levels if self.grid_step_percent is not None else None
-        return {"grid_range_percent": str(percent) if percent is not None else None,
+        return {"grid_limit_enabled": True, "grid_range_percent": str(percent) if percent is not None else None,
                 "grid_span_percent": str(2 * percent) if percent is not None else None,
                 "grid_lower": str(center - distance), "grid_upper": str(center + distance)}
 

@@ -6,7 +6,16 @@
   const signed = (v, digits = 4) => finite(v) ? (Number(v) > 0 ? '+' : '') + number(v, digits) : '—';
   const tone = v => !finite(v) || Number(v) === 0 ? 'neutral' : Number(v) > 0 ? 'gain' : 'loss';
   const gridLabel = row => row?.grid_step_percent != null ? `间距 ${Number(row.grid_step_percent)}%` : `间距 ${number(row?.grid_step, 2)} USDC/桶`;
-  const rangeLabel = row => finite(row?.grid_range_percent) ? `上下各 ${Number(row.grid_range_percent)}% · 总跨度 ${Number(row.grid_span_percent)}%` : `每侧 ${row?.max_levels ?? '—'} 层`;
+  const levelLabel = row => row?.grid_limit_enabled === false || row?.max_levels === null ? '格数不限' : `每侧 ${row?.max_levels ?? '—'} 层`;
+  const rangeLabel = row => row?.grid_limit_enabled === false || row?.max_levels === null ? '无固定覆盖范围' : finite(row?.grid_range_percent) ? `上下各 ${Number(row.grid_range_percent)}% · 总跨度 ${Number(row.grid_span_percent)}%` : levelLabel(row);
+  const boundsLabel = row => row?.grid_limit_enabled === false || row?.max_levels === null ? '随价差向外扩展 · 每格一组' : `${number(row?.grid_lower,4)} ～ ${number(row?.grid_upper,4)} USDC/桶`;
+  function gridWindow(row, lots, requestedPage = 0) {
+    const size=60, highest=lots.reduce((n, lot)=>Math.max(n, Number(lot.level)||0),0);
+    const unbounded=row?.grid_limit_enabled === false || row?.max_levels === null;
+    const extent=unbounded ? Math.ceil((highest+1)/size)*size : Math.max(highest, Number(row?.max_levels)||0);
+    const pages=Math.max(1,Math.ceil(extent/size)), page=Math.max(0,Math.min(pages-1,Math.floor(Number(requestedPage)||0)));
+    return {start:page*size+1,end:Math.min(extent,(page+1)*size),page,pages,highest};
+  }
   const limitLabel = (row, field = 'entry_notional_limit_usdc') => row?.margin_limit_enabled === false ? '金额不限' : finite(row?.[field]) ? number(row[field], 2) + ' USDC' : '—';
   const escape = v => String(v ?? '').replace(/[&<>"']/g, x => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[x]));
   function date(ts, short = false, year = false) {
@@ -42,7 +51,7 @@
       return '"' + text.replace(/"/g, '""') + '"';
     }).join(',')).join('\r\n');
   }
-  const model = { colors, finite, number, signed, tone, gridLabel, rangeLabel, limitLabel, escape, date, state, domain, path, csv };
+  const model = { colors, finite, number, signed, tone, gridLabel, levelLabel, rangeLabel, boundsLabel, gridWindow, limitLabel, escape, date, state, domain, path, csv };
   if (typeof module !== 'undefined' && module.exports) module.exports = model;
   else root.GridModel = model;
 })(typeof window !== 'undefined' ? window : globalThis);

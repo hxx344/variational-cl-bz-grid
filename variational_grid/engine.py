@@ -70,7 +70,8 @@ class Engine:
         deviation = spread - center
         direction = -1 if deviation > 0 else 1
         step = self.config.grid_step(center)
-        depth = min(int(abs(deviation) / step), self.config.max_levels) if step else 0
+        def reached(level):
+            return bool(step) and (self.config.max_levels is None or level <= self.config.max_levels) and step * level <= abs(deviation)
         actions = []
         with self.store.transaction():
             previous = self.store.get("last_tick")
@@ -83,7 +84,7 @@ class Engine:
                 self.store.set("halted", "max_drawdown")
             blocked = {tuple(x) for x in json.loads(self.store.get("blocked"))}
             # A closed slot must return inside its threshold before it can be entered again.
-            blocked = {(d, level) for d, level in blocked if d == direction and depth >= level}
+            blocked = {(d, level) for d, level in blocked if d == direction and reached(level)}
             for lot in self.store.lots():
                 net = self.exit_value(lot, cl, bz)[0] - dec(lot["entry_fee"])
                 reason = self.store.get("halted")
@@ -101,12 +102,16 @@ class Engine:
             margin_one = self.qty * (cl.mark + bz.mark) / dec(self.config.paper_leverage)
             margin = margin_one * len(lots)
             skip_reason = "zero_center" if not step else None
-            if allow_open and not actions and not self.store.get("halted") and depth:
+            if allow_open and not actions and not self.store.get("halted") and reached(1):
                 used = {(lot["direction"], lot["level"]) for lot in lots}
-                levels = [level for level in range(1, depth + 1) if (direction, level) not in used | blocked]
+                unavailable = used | blocked
+                level = 1
+                # Only inspect actual occupied/blocked slots, never the theoretical depth.
+                while (direction, level) in unavailable:
+                    level += 1
                 if any(lot["direction"] != direction for lot in lots):
                     skip_reason = "opposite_inventory"
-                elif levels and len(lots) < self.config.max_levels:
+                elif reached(level) and (self.config.max_levels is None or len(lots) < self.config.max_levels):
                     entry_fills = self.execution(direction, cl, bz, True)
                     entry_fee = sum((p * self.qty * self.fee for _, _, p in entry_fills), D(0))
                     round_trip_drag = sum((self.qty * (self.price(q, "buy") - self.price(q, "sell")) for q in (cl, bz)), D(0))
@@ -117,8 +122,8 @@ class Engine:
                     elif (peak - post_equity) / peak >= dec(self.config.max_drawdown_fraction):
                         skip_reason = "entry_drawdown"
                     else:
-                        lot_id = self.open(direction, levels[0], center, cl, bz, now)
-                        actions.append({"action": "open", "lot_id": lot_id, "direction": direction, "level": levels[0]})
+                        lot_id = self.open(direction, level, center, cl, bz, now)
+                        actions.append({"action": "open", "lot_id": lot_id, "direction": direction, "level": level})
             self.store.set("blocked", json.dumps(sorted(blocked)))
             self.store.set("last_tick", now)
             equity = self.equity(cl, bz)
@@ -130,6 +135,7 @@ class Engine:
                 "mode": "paper", "time_utc": utc(now), "center": str(center), "center_window_hours": self.config.center_hours, "spread_bz_minus_cl": str(spread),
                 "cl_mark": str(cl.mark), "bz_mark": str(bz.mark), "deviation": str(deviation),
                 "grid_step": str(step), "grid_step_percent": self.config.grid_step_percent,
+                "max_levels": self.config.max_levels, "paper_leverage": self.config.paper_leverage,
                 "grid_step_basis": "center_absolute" if self.config.grid_step_percent is not None else "absolute",
                 **self.config.grid_geometry(center),
                 "equity_usdc": str(equity), "cash_usdc": self.store.get("cash"), "realized_pnl_usdc": str(realized),

@@ -20,6 +20,24 @@ test('unknown values stay missing and signed losses are explicit', () => {
 test('range labels distinguish one direction from the full span', () => {
   assert.equal(M.rangeLabel({grid_range_percent:'30.0',grid_span_percent:'60.0'}), '上下各 30% · 总跨度 60%');
   assert.equal(M.rangeLabel({max_levels:8}), '每侧 8 层');
+  assert.equal(M.rangeLabel({max_levels:null}), '无固定覆盖范围');
+  assert.equal(M.levelLabel({max_levels:null}), '格数不限');
+  assert.equal(M.boundsLabel({max_levels:null}), '随价差向外扩展 · 每格一组');
+  assert.equal(M.levelLabel({}), '每侧 — 层');
+});
+
+test('occupancy windows stay bounded and can reach every occupied level', () => {
+  const row={max_levels:null}, lots=[{level:1},{level:1234}];
+  const first=M.gridWindow(row,lots), last=M.gridWindow(row,lots,99999);
+  assert.equal(first.start,1);
+  assert.equal(first.end,60);
+  assert.ok(last.start<=1234 && last.end>=1234);
+  assert.ok(last.end-last.start<60);
+  assert.equal(M.gridWindow(row,[],99).page,0);
+  assert.equal(M.gridWindow({max_levels:15},[]).end,15);
+  const sparse=M.gridWindow(row,[{level:1000000000}],1000000000);
+  assert.ok(sparse.end-sparse.start<60);
+  assert.ok(sparse.start<=1000000000 && sparse.end>=1000000000);
 });
 
 test('unlimited funding is explicit and distinct from zero or missing limits', () => {
