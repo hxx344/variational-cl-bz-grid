@@ -235,3 +235,69 @@ python3 -m variational_grid compare-reset --experiments /etc/variational-grid/ex
 一键升级会备份 `experiments.before-unbounded-grid-100x.json`，在各场景中显式写入上述三个参数，并改用 `-unbounded-grid-100x` 后缀的新实验目录。比较模式保留共享基础配置；单组模式对应备份 `config.before-unbounded-grid-100x.json` 并改用新 SQLite。旧账本完整保留，新一轮从零统计，重复安装不反复迁移，也不覆盖完成迁移后自行设置的参数。更早版本可能先产生范围、中枢和金额迁移备份，最终以当前配置的 `output_dir` 为准。
 
 旧配置省略 `max_levels`、`paper_leverage`、`max_margin_fraction` 时仍按 8 层、5 倍、0.80 解释，以便读取历史账本。显式设置数值时，旧额度规则为 `min(预计开仓后权益, 初始资金) × max_margin_fraction × paper_leverage`；默认旧参数对应双腿约 4,000 USDC。手动更改该字段时仍须改用新账本，不能直接改变旧持仓的计算规则。
+
+## 库存组合模拟：五组净桶数阈值
+
+库存模式在同一段 CL/BZ 行情下，对照 **0%、5%、10%、20% 和不限**五组库存阈值，各组基础资金、数量、费用和策略参数相同。配置见 [inventory.example.json](inventory.example.json)，`kind: "inventory"` 明确选择这套组合模拟；原有单组和三组价差网格继续保留。
+
+库存比例按账户实际持仓的净桶数计算：`abs(qCL + qBZ) / (abs(qCL) + abs(qBZ)) × 100%`，多头为正、空头为负，空仓记作 0%。它不是按美元金额计算的 Delta，也不是把各策略虚拟持仓直接相加后显示。超过所选阈值时，两腿向同一方向调整相同桶数，以半阈值为目标并按数量步长舍入，同时保持 CL/BZ 价差敏感度；不限组不触发这项库存调整。
+
+组合共用最近 **72 根已收盘 UTC 小时 K 线**的 CL 均价、BZ 均价和 BZ−CL 差价中枢，包含 **CL 多/BZ 空剥头皮、CL 与 BZ 各自的普通价格网格、固定 BZ 多/CL 空的反向价差网格**。先聚合各策略虚拟信号，再按账户净订单记录外部模拟成交和费用，内部抵消不重复计算成交。净收益包含未平仓浮盈亏与预计退出成本；不计资金费及真实强平，不调用实盘下单 API。
+
+`inventory.example.json` 的默认策略参数如下，五组仅库存阈值不同：
+
+| 参数 | 默认值 | 信号或统计口径 |
+| --- | --- | --- |
+| `scalp_step_percent` | 0.15% | 按 CL/BZ 各自价格幅度触发；CL 下跌新增多头、BZ 上涨新增空头，每个策略账本每次新增一份基础桶数 |
+| `scalp_take_profit_percent` | 0.10% | 剥头皮持仓有利方向的 mark 价格幅度，触发虚拟退出信号；不表示净收益率 |
+| `scalp_cooldown_seconds` | 60 秒 | 每个剥头皮策略账本的开仓冷却时间 |
+| `ordinary_step_percent` | 0.5% | 各品种 72 小时均价的百分比；低于均价做多、高于均价做空，每层一组 |
+| `spread_step_percent` | 1% | 72 小时 BZ−CL 价差中枢绝对值的百分比 |
+| `spread_direction` | `long` | 固定在价差低于中枢时多 BZ、空 CL；该层价差回升一格时产生退出信号 |
+| `execution_step_barrels` | 0.01 桶 | 库存调整的配置步长；实时指示性报价还会结合两品种数量 tick 和最小下单量 |
+| `reset_fraction` | 0.5 | 超过库存阈值后，以阈值的一半作为调整目标，按有效步长舍入 |
+| `risk_reference_percent` | 20% | 五组统一使用的库存比例超标时长统计基准，不是各组库存控制阈值 |
+| `enable_scalp` / `enable_ordinary` / `enable_spread` | `true` | 默认同时启用三类虚拟信号 |
+
+信号按 mark 价格触发，实际账户成交按对应数量的 bid/ask、滑点和手续费计算，信号退出条件不能当作净止盈承诺。实时模拟使用兼容双方 tick 且不低于双方最小数量的有效步长；因此 0% 阈值等目标可能无法精确达到，页面会保留残差并显示 `quantity_limited`。
+
+账户总损益满足 `total_pnl_usdc = realized_pnl_usdc + unrealized_pnl_usdc`，其中未实现损益已经扣除预计退出成本，不能再重复扣减。另一种归因是 `total_pnl_usdc = direction_pnl_usdc + spread_pnl_usdc - execution_cost_usdc - exit_cost_reserve_usdc`；净订单成交成本和退出成本储备都计入组合账户。
+
+库存模式继续不设格数、持仓金额和保证金预算上限。估算杠杆读取基础配置的 `paper_leverage`：新基础模板为 100 倍，已有配置的数值原样沿用；杠杆只影响保证金估算，不放大桶数和损益，也不代表已经设置交易所实盘杠杆。
+
+在项目目录中，可用同一份库存实验配置启动、查看状态、打开网页或归档重置；基础配置与登录会话应先按前文准备：
+
+```powershell
+python -m variational_grid compare --experiments inventory.example.json
+python -m variational_grid dashboard --experiments inventory.example.json --port 9876
+python -m variational_grid compare-status --experiments inventory.example.json
+python -m variational_grid compare-reset --experiments inventory.example.json --confirm
+```
+
+模拟与网页命令分别保持在两个终端运行，浏览器打开 [本地库存监控页](http://127.0.0.1:9876/)。重置作用于这份配置的全部五组，先归档原账本，再开始新一轮。
+
+在 Linux 服务器执行一条命令，即可安装或切换到库存模式：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/hxx344/variational-cl-bz-grid/main/install.sh | sudo bash -s -- --inventory
+```
+
+首次创建 `/etc/variational-grid/inventory.json`，并将现有 `config.json` 复制为独立的 `/etc/variational-grid/inventory-base.json`，保存基础资金、数量、费用及杠杆。登录会话仍指向原文件；之后切换旧模式不会改变库存模拟的经济参数。独立数据目录为 `/var/lib/variational-grid/inventory-pct-0-5-10-20-v1/`。库存策略参数由 `inventory.json` 保存，不执行旧价差网格迁移，不改写旧配置和账本。修改经济参数时需使用新 `output_dir`，不能把不同参数下的结果混在原账本中；页面重置用于相同参数下重新开始。
+
+重复执行会保留库存配置和数据；不带参数时继续运行已保存的模式。未变更的依赖、Git 对象、验证结果与正常服务继续复用；示例配置和网页资源变化会进入验证缓存判断，已有用户配置不会被新示例覆盖。`--compare` 切回原三组，`--single` 切回单组，之后仍可用 `--inventory` 返回库存模拟；各自账本保留。`--cleanup` 也会保护 `inventory.json` 指向的数据目录。
+
+库存模式复用 `variational-grid.service` 和 `variational-grid-web.service`，网页仍只监听服务器 `127.0.0.1:9876`。在自己的电脑保持以下 SSH 转发，再打开 [库存监控页](http://127.0.0.1:18765/)：
+
+```powershell
+ssh -N -o ExitOnForwardFailure=yes -L 18765:127.0.0.1:9876 root@你的服务器IP
+```
+
+也可以在项目目录生成三类独立合成路径，用于检查组合成交、库存调整与损益口径：
+
+```powershell
+python -m variational_grid inventory-demo --output output/inventory-oscillation --trajectory oscillation
+python -m variational_grid inventory-demo --output output/inventory-trend --trajectory trend
+python -m variational_grid inventory-demo --output output/inventory-divergence --trajectory divergence
+```
+
+每次指定一个新的输出目录，分别对应震荡、趋势和两品种分化。该命令验证合成行情下的行为，不是历史回测，也不代表真实市场收益。

@@ -1,0 +1,26 @@
+{
+  "kind": "inventory",
+  "base_config": "config.local.json",
+  "output_dir": "data/inventory-pct-0-5-10-20-v1",
+  "strategy": {
+    "scalp_step_percent": "0.15",
+    "scalp_take_profit_percent": "0.10",
+    "scalp_cooldown_seconds": 60,
+    "ordinary_step_percent": "0.5",
+    "spread_step_percent": "1",
+    "spread_direction": "long",
+    "execution_step_barrels": "0.01",
+    "reset_fraction": "0.5",
+    "risk_reference_percent": "20",
+    "enable_scalp": true,
+    "enable_ordinary": true,
+    "enable_spread": true
+  },
+  "scenarios": [
+    {"name": "delta-0pct", "tolerance_percent": "0"},
+    {"name": "delta-5pct", "tolerance_percent": "5"},
+    {"name": "delta-10pct", "tolerance_percent": "10"},
+    {"name": "delta-20pct", "tolerance_percent": "20"},
+    {"name": "delta-uncontrolled", "tolerance_percent": null}
+  ]
+}

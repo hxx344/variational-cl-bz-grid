@@ -195,6 +195,11 @@ def main(argv=None):
     sub = commands.add_parser("demo")
     sub.add_argument("--state-file", default="data/demo.sqlite3")
     sub.set_defaults(function=demo)
+    from .inventory_comparison import demo_inventory
+    sub = commands.add_parser("inventory-demo", help="Synthetic inventory-band comparison, not a historical backtest")
+    sub.add_argument("--output", default="data/inventory-demo")
+    sub.add_argument("--trajectory", choices=("oscillation", "trend", "divergence"), default="oscillation")
+    sub.set_defaults(function=demo_inventory)
     from .comparison import run_comparison, comparison_status, stop_comparison
     for name, function in (("compare", run_comparison), ("compare-status", comparison_status), ("compare-stop", stop_comparison)):
         sub = commands.add_parser(name)

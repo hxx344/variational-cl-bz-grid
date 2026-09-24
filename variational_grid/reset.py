@@ -133,6 +133,9 @@ def reset_comparison(args):
     if not args.confirm:
         raise GridError("Use --confirm to archive and reset every paper scenario")
     experiment = Experiment.load(args.experiments)
+    if getattr(experiment, "kind", None) == "inventory":
+        from .inventory_comparison import InventoryCohort
+        Cohort = InventoryCohort
     state = read_state(experiment)
     if state is None:
         raise GridError("No initialized simulation to reset")

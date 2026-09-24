@@ -70,6 +70,11 @@ def read_history(db, summary, window):
 
 def read_dashboard(experiment, window="24h"):
     with control_lock(experiment):
+        if window not in WINDOWS:
+            raise GridError("Unknown history window")
+        if getattr(experiment, "kind", None) == "inventory":
+            from .inventory_comparison import read_inventory_dashboard
+            return read_inventory_dashboard(experiment, window)
         return _read_dashboard(experiment, window)
 
 
@@ -146,6 +151,12 @@ def _read_dashboard(experiment, window):
 
 def make_server(experiment, port=9876):
     assets = Path(__file__).with_name("web")
+    routes = dict(ASSETS)
+    if getattr(experiment, "kind", None) == "inventory":
+        routes["/"] = ("inventory.html", "text/html; charset=utf-8")
+        routes["/inventory.js"] = ("inventory.js", "text/javascript; charset=utf-8")
+        routes["/inventory.css"] = ("inventory.css", "text/css; charset=utf-8")
+    routes["/index.html"] = routes["/"]
     reset_token = secrets.token_urlsafe(32)
 
     class Handler(BaseHTTPRequestHandler):
@@ -184,8 +195,8 @@ def make_server(experiment, port=9876):
                 return self.reply(403, b"Use a localhost SSH tunnel", head=head)
             parsed = urlsplit(self.path)
             try:
-                if parsed.path in ASSETS:
-                    filename, mime = ASSETS[parsed.path]
+                if parsed.path in routes:
+                    filename, mime = routes[parsed.path]
                     return self.reply(200, (assets / filename).read_bytes(), mime, head)
                 if parsed.path == "/api/dashboard":
                     query = parse_qs(parsed.query)

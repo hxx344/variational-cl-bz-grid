@@ -23,7 +23,7 @@ class InstallTests(unittest.TestCase):
         self.source = self.root / "repository"
         self.source.mkdir()
         shutil.copytree(self.project / "variational_grid", self.source / "variational_grid", ignore=shutil.ignore_patterns("__pycache__"))
-        for name in ("config.example.json", "experiments.example.json", "install.sh", "pyproject.toml"):
+        for name in ("config.example.json", "experiments.example.json", "inventory.example.json", "install.sh", "pyproject.toml"):
             shutil.copy(self.project / name, self.source / name)
         (self.source / "tests").mkdir()
         (self.source / "tests/test_release.py").write_text(
@@ -179,6 +179,177 @@ if name == "runuser":
         self.log.write_text('')
         self.install()
         self.assertFalse(any(c[0]=='apt-get' for c in self.calls()))
+
+    def test_inventory_fresh_install_preserves_saved_mode_and_reuses_unchanged_deployment(self):
+        result = self.install('--inventory')
+        self.assertIn('skipping legacy grid migrations', result.stdout)
+        self.assertEqual((self.conf / 'mode').read_text().strip(), 'inventory')
+        self.assertIn(f'compare --experiments {self.conf}/inventory.json', self.unit.read_text())
+        self.assertIn(f'dashboard --experiments {self.conf}/inventory.json --port 9876', self.web_unit.read_text())
+        self.assertFalse((self.conf / 'experiments.json').exists())
+        path = self.conf / 'inventory.json'
+        spec = json.loads(path.read_text())
+        self.assertEqual(spec['kind'], 'inventory')
+        self.assertEqual(len(spec['scenarios']), 5)
+        self.assertEqual(spec['base_config'], str(self.conf / 'inventory-base.json'))
+        self.assertEqual((self.conf / 'inventory-base.json').read_bytes(), (self.conf / 'config.json').read_bytes())
+        self.assertEqual(spec['output_dir'], str(self.state / 'inventory-pct-0-5-10-20-v1'))
+        output = Path(spec['output_dir'])
+        output.mkdir(exist_ok=True)
+        sentinel = output / 'existing-ledger'
+        sentinel.write_bytes(b'preserved inventory simulation')
+        original, validated = path.read_bytes(), self.validation_log.read_bytes()
+        self.log.write_text('')
+        self.install()  # No explicit flag must keep the saved inventory mode.
+        self.assertEqual((self.conf / 'mode').read_text().strip(), 'inventory')
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(sentinel.read_bytes(), b'preserved inventory simulation')
+        self.assertEqual(self.validation_log.read_bytes(), validated)
+        self.assertEqual(self.restarts(), [])
+        self.assertNotIn(['systemctl', 'daemon-reload'], self.calls())
+        self.assertFalse(any(c[0] == 'apt-get' or c[0] == 'git' and
+                             any(arg in ('fetch', 'clone', 'archive') for arg in c[1:]) for c in self.calls()))
+
+    def test_inventory_switch_preserves_legacy_configuration_and_all_mode_ledgers(self):
+        self.install()
+        config_path = self.conf / 'config.json'
+        config = json.loads(config_path.read_text())
+        config.update(center_hours=168, max_levels=8, max_margin_fraction='0.80', paper_leverage='5',
+                      paper_balance_usdc='1700', quantity_barrels='2', fee_bps_per_leg='1')
+        config_path.write_text(json.dumps(config))
+        old_spec = self.conf / 'experiments.json'
+        old_output = Path(json.loads(old_spec.read_text())['output_dir'])
+        old_output.mkdir(exist_ok=True)
+        sentinel = old_output / 'existing-compare-ledger'
+        sentinel.write_bytes(b'preserved comparison')
+        single_ledger = Path(config['state_file'])
+        single_ledger.write_bytes(b'preserved single ledger')
+        preserved = {p: p.read_bytes() for p in (config_path, old_spec, sentinel, single_ledger)}
+        self.install('--inventory')
+        for path, content in preserved.items():
+            self.assertEqual(path.read_bytes(), content)
+        self.assertFalse(list(self.conf.glob('*.before-*.json')))
+        inventory_path = self.conf / 'inventory.json'
+        inventory = inventory_path.read_bytes()
+        inventory_output = Path(json.loads(inventory)['output_dir'])
+        inventory_output.mkdir(exist_ok=True)
+        inventory_ledger = inventory_output / 'existing-inventory-ledger'
+        inventory_ledger.write_bytes(b'preserved inventory ledger')
+        # This comparison already has its own versioned center; switching back must
+        # neither migrate the shared base nor overwrite the inventory experiment.
+        self.install('--compare')
+        self.assertIn(f'compare --experiments {self.conf}/experiments.json', self.unit.read_text())
+        self.install('--inventory')
+        self.assertEqual(inventory_path.read_bytes(), inventory)
+        self.assertEqual(sentinel.read_bytes(), b'preserved comparison')
+        self.install('--single')
+        self.assertIn(' run --config ', self.unit.read_text())
+        self.assertIn(['systemctl', 'disable', '--now', 'variational-grid-web.service'], self.calls())
+        self.install('--inventory')
+        self.assertEqual(inventory_path.read_bytes(), inventory)
+        self.assertEqual(old_spec.read_bytes(), preserved[old_spec])
+        self.assertEqual(sentinel.read_bytes(), b'preserved comparison')
+        self.assertEqual(single_ledger.read_bytes(), b'preserved single ledger')
+        self.assertEqual(inventory_ledger.read_bytes(), b'preserved inventory ledger')
+        self.assertIn(f'dashboard --experiments {self.conf}/inventory.json', self.web_unit.read_text())
+
+    def test_inventory_real_manifest_survives_legacy_single_migration(self):
+        from variational_grid.inventory_comparison import InventoryCohort, InventoryExperiment
+        self.install()
+        path = self.conf / 'config.json'
+        config = json.loads(path.read_text())
+        config.update(paper_leverage='5', center_hours=168, max_levels=8,
+                      max_margin_fraction='0.8', state_file=str(self.state / 'paper.sqlite3'))
+        path.write_text(json.dumps(config))
+        self.install('--inventory')
+        base_path = self.conf / 'inventory-base.json'
+        preserved = base_path.read_bytes()
+        experiment_path = self.conf / 'inventory.json'
+        experiment = InventoryExperiment.load(experiment_path)
+        with InventoryCohort(experiment):
+            pass  # Creates the real cohort manifest and each account's SQLite identity.
+        manifest_path = experiment.output / 'experiment.json'
+        manifest = manifest_path.read_bytes()
+        self.install('--single')
+        self.assertEqual(json.loads(path.read_text())['paper_leverage'], '100')
+        self.assertEqual(base_path.read_bytes(), preserved)
+        self.install('--inventory')
+        resumed = InventoryExperiment.load(experiment_path)
+        self.assertEqual(resumed.base.paper_leverage, '5')
+        with InventoryCohort(resumed):
+            pass  # Must accept and resume the original identity.
+        self.assertEqual(manifest_path.read_bytes(), manifest)
+        self.log.write_text('')
+        config = json.loads(path.read_text())
+        config['fee_bps_per_leg'] = '3'
+        path.write_text(json.dumps(config))
+        self.install()
+        self.assertEqual(self.restarts(), [])  # Unused legacy settings are outside the inventory cache key.
+        base = json.loads(base_path.read_text())
+        base['fee_bps_per_leg'] = '2'
+        base_path.write_text(json.dumps(base))
+        spec = json.loads(experiment_path.read_text())
+        spec['output_dir'] = str(self.state / 'inventory-new-costs')
+        experiment_path.write_text(json.dumps(spec))
+        self.install()
+        self.assertEqual(self.restarts(), ['variational-grid.service', 'variational-grid-web.service'])
+
+    def test_inventory_example_revalidates_without_rewriting_config_and_assets_restart_only_web(self):
+        self.install('--inventory')
+        config_path = self.conf / 'inventory.json'
+        spec = json.loads(config_path.read_text())
+        spec['output_dir'] = str(self.state / 'custom-inventory-run')
+        config_path.write_text(json.dumps(spec))
+        self.install()  # Apply the deliberate output-path change once.
+        preserved = config_path.read_bytes()
+        with (self.source / 'inventory.example.json').open('a') as stream:
+            stream.write('\n')
+        self.commit()
+        self.log.write_text('')
+        self.install()
+        self.assertEqual(len(self.validation_log.read_text().splitlines()), 2)
+        self.assertEqual(config_path.read_bytes(), preserved)
+        self.assertEqual(self.restarts(), [])
+        (self.source / 'variational_grid/web/inventory-ui-fixture.css').write_text('/* new inventory asset */\n')
+        self.commit()
+        self.log.write_text('')
+        self.install()
+        self.assertEqual(len(self.validation_log.read_text().splitlines()), 3)
+        self.assertEqual(self.restarts(), ['variational-grid-web.service'])
+        self.assertEqual(config_path.read_bytes(), preserved)
+
+    def test_invalid_preserved_inventory_does_not_switch_existing_services(self):
+        self.install()
+        path = self.conf / 'inventory.json'
+        path.write_text(json.dumps({'kind': 'unexpected'}))
+        original = path.read_bytes()
+        current = (self.app / 'current').resolve()
+        units = (self.unit.read_bytes(), self.web_unit.read_bytes())
+        self.log.write_text('')
+        result = self.install('--inventory', expected=1)
+        self.assertIn('requires kind=inventory', result.stderr)
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual((self.app / 'current').resolve(), current)
+        self.assertEqual((self.conf / 'mode').read_text().strip(), 'compare')
+        self.assertEqual((self.unit.read_bytes(), self.web_unit.read_bytes()), units)
+        self.assertEqual(self.restarts(), [])
+
+    def test_inventory_normalization_still_rejects_different_base_economics(self):
+        self.install('--inventory')
+        config = json.loads((self.conf / 'config.json').read_text())
+        config['paper_balance_usdc'] = '1700'
+        other_base = self.conf / 'other-base.json'
+        other_base.write_text(json.dumps(config))
+        path = self.conf / 'inventory.json'
+        spec = json.loads(path.read_text())
+        spec['base_config'] = str(other_base)
+        path.write_text(json.dumps(spec))
+        original = path.read_bytes()
+        self.log.write_text('')
+        result = self.install('--inventory', expected=1)
+        self.assertIn('Service experiments must use', result.stderr)
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(self.restarts(), [])
 
     def test_docs_reuse_validation_and_web_change_only_restarts_web(self):
         self.install()

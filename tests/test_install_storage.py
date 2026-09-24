@@ -121,6 +121,26 @@ class StorageTests(unittest.TestCase):
         self.manager = self.storage_type(self.app, self.conf, self.state)
         self.assertFalse(self.manager.remove(release))
 
+    def test_inventory_output_protects_its_release_for_absolute_and_config_relative_paths(self):
+        release = self.release(1, ready=False)
+        output = release / 'inventory-data'
+        output.mkdir()
+        sentinel = output / 'ledger.sqlite3'
+        sentinel.write_bytes(b'preserved inventory ledger')
+        for relative in (False, True):
+            with self.subTest(relative=relative):
+                configured = os.path.relpath(output, self.conf) if relative else str(output)
+                (self.conf / 'inventory.json').write_text(json.dumps({'kind': 'inventory', 'output_dir': configured}))
+                self.manager = self.storage_type(self.app, self.conf, self.state)
+                self.assertFalse(self.manager.remove(release))
+                self.assertEqual(sentinel.read_bytes(), b'preserved inventory ledger')
+
+    def test_inventory_base_protects_its_session_path(self):
+        release = self.release(1, ready=False)
+        (self.conf / 'inventory-base.json').write_text(json.dumps({'session_file': str(release / 'session.json')}))
+        self.manager = self.storage_type(self.app, self.conf, self.state)
+        self.assertFalse(self.manager.remove(release))
+
     def test_reclaims_owned_staging_and_deployment_scratch_only(self):
         for root, name in ((self.app, '.deploy.ABC123'), (self.app / 'releases', '.staging.ABC123')):
             owned = root / name

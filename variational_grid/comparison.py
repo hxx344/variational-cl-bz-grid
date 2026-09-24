@@ -36,6 +36,9 @@ class Experiment:
         path = Path(path).resolve()
         try:
             data = json.loads(path.read_text(encoding="utf-8-sig"))
+            if isinstance(data, dict) and data.get("kind") == "inventory":
+                from .inventory_comparison import InventoryExperiment
+                return InventoryExperiment.load(path)
             if set(data) - {"base_config", "output_dir", "scenarios", "center_hours"} or not {"base_config", "output_dir", "scenarios"} <= set(data):
                 raise ValueError()
             base = configuration(path.parent / data["base_config"])
@@ -141,6 +144,15 @@ class Cohort:
         self.stores = {}
         self.engines = {}
 
+    def create_store(self, config):
+        return Store(config.state_file, config)
+
+    def create_engine(self, config, store):
+        return Engine(config, store)
+
+    def decode_frame(self, raw):
+        return Frame.decode(raw)
+
     def __enter__(self):
         output = self.experiment.output
         try:
@@ -160,10 +172,10 @@ class Cohort:
             self.db.executescript("CREATE TABLE IF NOT EXISTS frames(ts REAL PRIMARY KEY,payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS summaries(ts REAL PRIMARY KEY,payload TEXT NOT NULL); CREATE TABLE IF NOT EXISTS runtime(id INTEGER PRIMARY KEY CHECK(id=1),payload TEXT NOT NULL);")
             for name, config in self.experiment.scenarios.items():
                 self.stack.enter_context(ProcessLock(config.state_file))
-                store = Store(config.state_file, config)
+                store = self.create_store(config)
                 self.stack.callback(store.close)
                 self.stores[name] = store
-                self.engines[name] = Engine(config, store)
+                self.engines[name] = self.create_engine(config, store)
             from .reset import initialize, process_reset
             initialize(self.experiment)
             process_reset(self)
@@ -212,7 +224,7 @@ class Cohort:
         floor = min(float(store.get("last_tick", "0")) for store in self.stores.values())
         # Include a frame applied to all ledgers but not yet published before a crash.
         for raw, in self.db.execute("SELECT payload FROM frames WHERE ts > ? ORDER BY ts", (min(floor, published),)).fetchall():
-            self.apply(Frame.decode(raw))
+            self.apply(self.decode_frame(raw))
 
     def apply(self, frame):
         snapshots = {}
@@ -278,6 +290,9 @@ class Cohort:
 def run_comparison(args):
     from .cli import emit
     experiment = Experiment.load(args.experiments)
+    if getattr(experiment, "kind", None) == "inventory":
+        from .inventory_comparison import run_inventory
+        return run_inventory(args, experiment)
     feed = MarketFeed(experiment)
     emit({"event": "session", **feed.client.check_session()})
     with Cohort(experiment) as cohort:

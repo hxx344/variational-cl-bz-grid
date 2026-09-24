@@ -6,16 +6,17 @@ requested_mode=
 cleanup_only=0
 usage() {
   cat <<'HELP'
-Usage: install.sh [--compare|--single|--cleanup|--help]
+Usage: install.sh [--compare|--inventory|--single|--cleanup|--help]
 Debian 12+ / Ubuntu 24.04+, with systemd and Python 3.11+.
 New installs run the 0.5% / 1% / 2% paper comparison by default.
-Each direction spans 30% of the center: 60 / 30 / 15 levels respectively.
+Grid levels and paper margin budgets are unlimited, with 100x margin estimates.
 The comparison includes a localhost dashboard on port 9876, accessed over SSH.
 Repeating the command upgrades code and preserves mode, settings and data.
 Earlier default experiments migrate to +/-30% with a backup and new ledgers.
 Earlier seven-day centers migrate to three days with separate preserved ledgers.
 Unchanged dependencies, validated code and running services are reused.
   --compare  Start the three-grid comparison (also switches existing installs).
+  --inventory  Start the five-scenario inventory comparison with its own ledgers.
   --single   Start one grid using config.json.
   --cleanup  Reclaim obsolete deployments without downloading or restarting.
   --help     Show this help without installing anything.
@@ -27,6 +28,7 @@ if [[ $# -gt 1 ]]; then
 fi
 case ${1:-} in
   --compare) requested_mode=compare ;;
+  --inventory) requested_mode=inventory ;;
   --single) requested_mode=run ;;
   --cleanup) cleanup_only=1 ;;
   --help|-h) usage; exit 0 ;;
@@ -63,7 +65,7 @@ class DeploymentStorage:
             self.protect(installer_source)
         # Preserve any configured path, including symlinks to a release. Config is
         # parsed as data; neither credentials nor configuration values are printed.
-        for name in ('config.json', 'experiments.json'):
+        for name in ('config.json', 'inventory-base.json', 'experiments.json', 'inventory.json'):
             path = self.conf / name
             self.protect(path)
             if not path.exists():
@@ -76,6 +78,9 @@ class DeploymentStorage:
                 if isinstance(value, str) and value:
                     configured = Path(value)
                     if not configured.is_absolute():
+                        # Application paths are relative to the configuration file.
+                        # Also retain the historical current-relative protection.
+                        self.protect(path.parent / configured)
                         configured = self.current / configured
                     self.protect(configured)
 
@@ -169,7 +174,8 @@ class DeploymentStorage:
         # retained legacy release so a no-op upgrade still reuses validation.
         result = subprocess.run(['git', '-C', str(self.source), 'ls-tree', '-r', release.name, '--',
                                  'variational_grid', 'tests', 'install.sh', 'config.example.json',
-                                 'experiments.example.json', 'pyproject.toml'], capture_output=True)
+                                 'experiments.example.json', 'inventory.example.json',
+                                 'pyproject.toml'], capture_output=True)
         if result.returncode:
             return None
         version = subprocess.check_output([sys.executable, '--version'])
@@ -324,7 +330,13 @@ fi
 python3 -c 'import sys; assert sys.version_info >= (3, 11), "Python 3.11+ required (Debian 12+ / Ubuntu 24.04+)"'
 
 mode=${requested_mode:-$(cat "$conf/mode" 2>/dev/null || echo compare)}
-[[ $mode == run || $mode == compare ]] || { echo 'Invalid saved service mode.' >&2; exit 1; }
+[[ $mode == run || $mode == compare || $mode == inventory ]] || { echo 'Invalid saved service mode.' >&2; exit 1; }
+experiment_name=experiments.json
+config_name=config.json
+if [[ $mode == inventory ]]; then
+  experiment_name=inventory.json
+  config_name=inventory-base.json
+fi
 
 id "$account" >/dev/null 2>&1 || useradd --system --home-dir "$state" --shell /usr/sbin/nologin "$account"
 install -d -m 755 "$app" "$app/releases" "$conf"
@@ -351,7 +363,7 @@ release="$app/releases/$revision"
 # Docs-only revisions can reuse a successful result; failed runs never write it.
 validation_key=$({
   python3 --version
-  git -C "$app/source" ls-tree -r "$revision" -- variational_grid tests install.sh config.example.json experiments.example.json pyproject.toml
+  git -C "$app/source" ls-tree -r "$revision" -- variational_grid tests install.sh config.example.json experiments.example.json inventory.example.json pyproject.toml
 } | sha256sum | cut -d ' ' -f1)
 install -d -m 755 "$app/validated"
 validate_release() {
@@ -400,17 +412,39 @@ Path(sys.argv[2]).write_text(json.dumps(data, indent=2) + '\n')
 PY
   chmod 644 "$conf/experiments.json"
 fi
+if [[ $mode == inventory && ! -f "$conf/inventory-base.json" ]]; then
+  # Freeze the starting economics independently of later legacy-mode migrations.
+  install -m 644 "$conf/config.json" "$conf/inventory-base.json"
+fi
+if [[ $mode == inventory && ! -f "$conf/inventory.json" ]]; then
+  python3 - "$release/inventory.example.json" "$conf/inventory.json" <<'PY'
+import json, sys
+from pathlib import Path
+data = json.loads(Path(sys.argv[1]).read_text())
+data['base_config'] = '/etc/variational-grid/inventory-base.json'
+data['output_dir'] = '/var/lib/variational-grid/inventory-pct-0-5-10-20-v1'
+Path(sys.argv[2]).write_text(json.dumps(data, indent=2) + '\n')
+PY
+  chmod 644 "$conf/inventory.json"
+fi
 # Validate preserved config before switching the running version.
 (cd "$release" && python3 - "$mode" <<'PY'
-import sys
+import json, sys
+from dataclasses import replace
 from pathlib import Path
 from variational_grid.cli import configuration
 from variational_grid.comparison import Experiment
-config = configuration('/etc/variational-grid/config.json')
-if sys.argv[1] == 'compare':
-    experiment = Experiment.load('/etc/variational-grid/experiments.json')
-    if experiment.base != config:
-        raise SystemExit('Service experiments must use /etc/variational-grid/config.json')
+base_path = Path('/etc/variational-grid') / ('inventory-base.json' if sys.argv[1] == 'inventory' else 'config.json')
+config = configuration(base_path)
+if sys.argv[1] in ('compare', 'inventory'):
+    name = 'inventory.json' if sys.argv[1] == 'inventory' else 'experiments.json'
+    path = Path('/etc/variational-grid') / name
+    if sys.argv[1] == 'inventory' and json.loads(path.read_text()).get('kind') != 'inventory':
+        raise SystemExit('Inventory service requires kind=inventory')
+    experiment = Experiment.load(path)
+    expected = replace(config, center_hours=72, max_levels=None, max_margin_fraction=None) if sys.argv[1] == 'inventory' else config
+    if experiment.base != expected:
+        raise SystemExit(f'Service experiments must use {base_path}')
     output = experiment.output
     if output == Path('/var/lib/variational-grid') or not output.is_relative_to('/var/lib/variational-grid'):
         raise SystemExit('Service experiment output must stay inside /var/lib/variational-grid')
@@ -421,11 +455,11 @@ for value in (config.session_file, config.state_file):
         raise SystemExit('Service session_file and state_file must stay inside /var/lib/variational-grid')
 PY
 )
-if ! (cd "$release" && runuser -u "$account" -- python3 -m variational_grid check-session --config "$conf/config.json"); then
+if ! (cd "$release" && runuser -u "$account" -- python3 -m variational_grid check-session --config "$conf/$config_name"); then
   echo 'A valid login session is needed for quantity-specific indicative quotes; public candles and statistics do not require one.'
   echo 'Paste only the vr-token cookie when prompted (input is hidden). No wallet private key is needed.'
   # /dev/tty keeps this interactive even when the installer arrives through curl | bash.
-  (cd "$release" && runuser -u "$account" -- python3 -m variational_grid init-session --config "$conf/config.json" </dev/tty)
+  (cd "$release" && runuser -u "$account" -- python3 -m variational_grid init-session --config "$conf/$config_name" </dev/tty)
 fi
 # Always validate configuration and the session above. Neither requires a restart
 # when unchanged; refreshed session files are already reloaded by the simulator.
@@ -441,7 +475,8 @@ else:
 PY
   )
 fi
-(cd "$release" && python3 - "$mode" "$conf" <<'PY'
+if [[ $mode != inventory ]]; then
+  (cd "$release" && python3 - "$mode" "$conf" <<'PY'
 import sys
 from pathlib import Path
 from variational_grid.migration import upgrade_center, upgrade_margin_limit, upgrade_unbounded_grid
@@ -463,11 +498,14 @@ if backup:
 else:
     print('Grid/leverage settings unchanged; skipping unbounded-grid migration.')
 PY
-)
+  )
+else
+  echo 'Inventory strategy selected; skipping legacy grid migrations.'
+fi
 settings_key=$({
   printf '%s\n' "$mode"
-  sha256sum "$conf/config.json"
-  if [[ $mode == compare ]]; then sha256sum "$conf/experiments.json"; fi
+  sha256sum "$conf/$config_name"
+  if [[ $mode != run ]]; then sha256sum "$conf/$experiment_name"; fi
 } | sha256sum | cut -d ' ' -f1)
 engine_key=$({
   printf '%s\n' "$settings_key"
@@ -508,9 +546,9 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 [Install]
 WantedBy=multi-user.target
 UNIT
-if [[ $mode == compare ]]; then
-  sed -i 's|^ExecStart=.*|ExecStart=/usr/bin/python3 -m variational_grid compare --experiments /etc/variational-grid/experiments.json|' "$deployment/variational-grid.service"
-  cat >"$deployment/variational-grid-web.service" <<'UNIT'
+if [[ $mode != run ]]; then
+  sed -i "s|^ExecStart=.*|ExecStart=/usr/bin/python3 -m variational_grid compare --experiments $conf/$experiment_name|" "$deployment/variational-grid.service"
+  cat >"$deployment/variational-grid-web.service" <<UNIT
 [Unit]
 Description=Variational paper grid dashboard (localhost)
 After=variational-grid.service
@@ -520,7 +558,7 @@ Type=simple
 User=variational-grid
 Group=variational-grid
 WorkingDirectory=/opt/variational-grid/current
-ExecStart=/usr/bin/python3 -m variational_grid dashboard --experiments /etc/variational-grid/experiments.json --port 9876
+ExecStart=/usr/bin/python3 -m variational_grid dashboard --experiments $conf/$experiment_name --port 9876
 Restart=on-failure
 RestartSec=10
 UMask=0077
@@ -582,7 +620,7 @@ apply_service() {
   fi
 }
 apply_service variational-grid.service "$engine_key" "$engine_unit_changed" "$app/applied-engine"
-if [[ $mode == compare ]]; then
+if [[ $mode != run ]]; then
   apply_service variational-grid-web.service "$web_key" "$web_unit_changed" "$app/applied-web"
 fi
 touch "$release/.install-ready"
@@ -590,10 +628,10 @@ storage prune "$old_current"
 
 echo 'Paper simulation ready. Settings and ledger are preserved on repeat installation.'
 printf 'Service mode: %s\n' "$mode"
-echo 'Settings: /etc/variational-grid/config.json'
-if [[ $mode == compare ]]; then
-  echo 'Experiments: /etc/variational-grid/experiments.json'
-  echo 'Report: <output_dir from experiments.json>/public/index.html'
+printf 'Settings: %s/%s\n' "$conf" "$config_name"
+if [[ $mode != run ]]; then
+  printf 'Experiments: %s/%s\n' "$conf" "$experiment_name"
+  printf 'Report: <output_dir from %s>/public/index.html\n' "$experiment_name"
   echo 'Dashboard: run this on your own computer (keep the terminal open):'
   echo '  ssh -N -o ExitOnForwardFailure=yes -L 18765:127.0.0.1:9876 USER@SERVER_IP'
   echo 'Then open http://127.0.0.1:18765/ in your browser. No public web port is required.'

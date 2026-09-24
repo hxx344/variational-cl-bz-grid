@@ -1,0 +1,30 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="color-scheme" content="light"><title>CL / BZ 组合库存对照</title>
+  <link rel="icon" href="data:,">
+  <link rel="stylesheet" href="/inventory.css"><script defer src="/model.js"></script><script defer src="/inventory.js"></script>
+</head>
+<body>
+<a class="skip" href="#main">跳到监控内容</a>
+<main id="main">
+  <header class="topbar"><div><span class="eyebrow">CL / BZ · 联合模拟</span><h1>组合库存对照</h1><p>同一行情，比较不同方向容忍度的收益与代价。</p></div><div class="actions"><span id="status" class="status" role="status">连接中</span><button id="refresh" class="button">刷新</button><button id="reset" class="button" disabled>重置模拟</button></div></header>
+  <div class="basis-note"><strong id="data-kind">模拟交易 · 等待行情</strong><span>收益未计资金费；指示性报价与模拟成交不代表真实成交。</span></div>
+  <div id="notice" class="notice" role="status" hidden></div><div id="reset-message" class="notice" role="status" hidden></div>
+  <section aria-labelledby="overview-title"><div class="section-head"><div><h2 id="overview-title">容忍度与组合表现</h2><p id="experiment-info">等待第一份有效行情</p></div><button id="all-strategies" class="button">全部策略</button></div><div id="strategies" class="strategy-grid"><div class="empty">正在读取模拟账本…</div></div></section>
+  <div class="chart-toolbar"><div><label for="strategy-select">查看策略</label><select id="strategy-select"><option value="all">全部策略</option></select></div><div class="segmented" role="group" aria-label="曲线时间范围"><button data-range="1h">1 小时</button><button data-range="24h" aria-pressed="true">24 小时</button><button data-range="7d">7 天</button></div></div>
+  <section class="charts-layout" aria-label="收益与方向风险曲线">
+    <article class="panel"><div class="panel-head"><h2>累计总收益 <span class="unit">USDC</span></h2><p>已实现 + 持仓净浮盈亏（已含预计退出成本）</p></div><div id="pnl-legend" class="legend"></div><div id="pnl-chart" class="chart" aria-label="各组累计总收益曲线"></div></article>
+    <article class="panel"><div class="panel-head"><h2>方向偏离比例 <span class="unit">%</span></h2><p id="threshold-note">选中单组可查看其容忍阈值线</p></div><div id="ratio-legend" class="legend"></div><div id="ratio-chart" class="chart" aria-label="各组实际净桶数方向偏离比例曲线"></div></article>
+  </section>
+  <section class="sample-panel" aria-label="采样明细"><div class="inspect"><label for="sample">查看采样点</label><input id="sample" type="range" min="0" max="0" value="0" disabled><output id="sample-time">—</output></div><div id="sample-values" class="sample-values"></div><p id="history-note" class="small"></p></section>
+  <section class="panel risk-panel" aria-labelledby="risk-title"><div class="panel-head"><h2 id="risk-title">风险与纠偏成本</h2><p id="risk-note">各组资金独立，所有累计指标均从本轮实验开始计算。</p></div><div id="risk-table"></div></section>
+  <section class="panel attribution-panel" aria-labelledby="attribution-title"><div class="panel-head"><h2 id="attribution-title">收益归因核对 <span class="unit">USDC</span></h2><p>方向收益 + 价差收益 − 执行成本 − 退出储备 = 总收益</p></div><div id="attribution"></div></section>
+  <section id="details" class="panel detail-panel"><div class="detail-toolbar"><div class="tabs" role="tablist" aria-label="账本明细"><button id="tab-positions" role="tab" data-view="positions" aria-selected="true" aria-controls="detail-content">实际仓位</button><button id="tab-trades" role="tab" data-view="trades" aria-selected="false" aria-controls="detail-content">成交记录</button><button id="tab-parameters" role="tab" data-view="parameters" aria-selected="false" aria-controls="detail-content">参数与口径</button></div><button id="export" class="button" hidden>导出成交</button></div><div id="detail-content" role="tabpanel" aria-labelledby="tab-positions"></div><div id="pagination" class="pagination" hidden><span id="page-label"></span><div><button id="previous" class="button">上一页</button><button id="next" class="button">下一页</button></div></div><p id="detail-note" class="detail-note"></p></section>
+  <details class="method"><summary>库存定义与模拟口径</summary><div><p>先将 CL 多头 scalp、BZ 空头 scalp、CL / BZ 普通价格网格与反向价差网格（默认做多 BZ、做空 CL）汇总为真实模拟账户的两条净仓位 qCL、qBZ；多头为正，空头为负。方向偏离比例 = |qCL + qBZ| ÷ (|qCL| + |qBZ|)，两腿都为零时为 0。容忍度基于实际净桶数，不是美元名义金额比。</p><p>方向桶数 = qCL + qBZ；价差桶数 = (qBZ − qCL) ÷ 2。纠偏同时向两腿调整相同的有符号桶数，保持价差暴露不变；原始方向桶数指纠偏前的策略目标合计。0% 为方向中性目标，不限组不主动纠偏。交易数量步长可能留下无法精确归零的残差，页面保留真实结果。</p><p>净仓位按同一帧行情估值。执行成本包含成交相对共同标记价的价差、滑点和手续费，也可能因报价时差有利而为负；退出储备估算现存仓位退出成本，已计入净浮盈亏。手续费和纠偏成本都是执行成本的组成部分，不再重复扣除。收益归因是账户持仓随市场价格变化的方向 / 价差分解，不是各策略模块的收益相加。</p><p>风险表的超参考阈值时长使用所有组共同的参考比例；本组超阈值时长使用该组自身容忍度。观测时长排除超过 max(60 秒, 采样周期 × 3) 的行情缺口。保证金按各组配置杠杆估算，杠杆不倍增桶数或损益。未计资金费与实际强平机制。历史曲线可能降采样，明细为最近已发布的共同采样；短期模拟结果不足以确定长期优劣。</p></div></details>
+  <footer><span>模拟监控 · 北京时间</span><span id="freshness">等待有效行情</span></footer>
+  <noscript><p class="notice">本页需要启用 JavaScript 才能读取库存模拟账本。</p></noscript>
+  <dialog id="reset-dialog" aria-labelledby="reset-title"><h2 id="reset-title">归档并重置全部模拟组</h2><p>旧账本先归档，随后清空各组仓位、损益、成交量和停机状态，各组恢复自己的初始资金。参数和登录会话保留；重置不产生模拟平仓成交。</p><p id="reset-balances"></p><div class="dialog-actions"><button id="reset-cancel" class="button">取消</button><button id="reset-confirm" class="button primary">归档并重新开始</button></div></dialog>
+</main>
+</body></html>
