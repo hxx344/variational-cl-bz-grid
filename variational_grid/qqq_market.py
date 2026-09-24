@@ -5,9 +5,12 @@ REST book has no exchange timestamp/sequence; HTTP Date is labelled as such,
 and a recent-trades overlap plus bounded poll interval guards simulated fills.
 The first batch and every lost interval only establish a new queue anchor.
 """
+from contextlib import contextmanager
 from decimal import Decimal, InvalidOperation
 from email.utils import parsedate_to_datetime
 import json
+import math
+import threading
 import time
 import urllib.error
 import urllib.parse
@@ -60,16 +63,97 @@ def _fresh(source_ts, now, maximum_age):
     return -2 <= now - source_ts <= maximum_age
 
 
+class RequestDeferred(GridError):
+    def __init__(self, venue, path, retry_at, now, *, limited=False):
+        self.venue, self.path, self.retry_at, self.limited = venue, path, retry_at, limited
+        wait = max(0, math.ceil(retry_at - now))
+        state = "HTTP 429 限流冷却" if limited else "报价请求排队"
+        super().__init__(f"{venue} {path}：{state}，约 {wait} 秒后重试")
+
+
+def retry_delay(header, now, fallback):
+    """Honor both Retry-After formats; never truncate a server's longer delay."""
+    try:
+        value = str(header).strip()
+        if value.isascii() and value.isdigit():
+            delay = float(value)
+        else:
+            delay = parsedate_to_datetime(value).timestamp() - now
+        if math.isfinite(delay) and delay > 0:
+            return max(fallback, delay)
+    except (ValueError, TypeError, OverflowError):
+        pass
+    return fallback
+
+
 class _Transport:
     def __init__(self, origin, allowed, opener=None, clock=None):
         self.origin = origin
         self.allowed = allowed
         self.opener = opener or urllib.request.build_opener(NoRedirect())
         self.clock = clock or time.time
+        self.venue = "Variational" if origin == ORIGIN else "Lighter"
+        self.retry_at, self.next_quote_at = 0.0, 0.0
+        self.limited_path, self.failures = "", {}
+        self.quote_interval = 3.0 if origin == ORIGIN else 0.0
+        self.lock = threading.RLock()
+        self._batch_remaining = None
+        self._batch_probe = False
 
-    def request(self, method, path, *, query=None, body=None):
+    @contextmanager
+    def quote_batch(self):
+        """One frame: a fresh probe may be followed by ONE exact-size quote.
+
+        Both requests consume the time budget. The exception to spacing never
+        bypasses 429 cooldown and cannot leak into the following frame.
+        """
+        self._batch_remaining, self._batch_probe = 2, False
+        try:
+            yield
+        finally:
+            self._batch_remaining, self._batch_probe = None, False
+
+    def check_cooldown(self):
+        now = self.clock()
+        if now < self.retry_at:
+            raise RequestDeferred(self.venue, self.limited_path, self.retry_at, now, limited=True)
+
+    def state(self):
+        return {"venue": self.venue, "retry_at": self.retry_at, "path": self.limited_path,
+                "next_quote_at": self.next_quote_at, "quote_interval": self.quote_interval, "failures": dict(self.failures)}
+
+    def restore(self, state):
+        if not isinstance(state, dict) or state.get("venue") != self.venue:
+            raise GridError("Invalid saved market cooldown")
+        for key in ("retry_at", "next_quote_at", "quote_interval"):
+            value = state.get(key)
+            if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
+                raise GridError("Invalid saved market cooldown")
+        path = state.get("path", "")
+        failures = state.get("failures", {})
+        if path and not any(p == path for _, p in self.allowed):
+            raise GridError("Invalid saved cooldown route")
+        if not isinstance(failures, dict) or any(p not in {p for _, p in self.allowed} or type(n) is not int or not 0 <= n <= 20 for p, n in failures.items()):
+            raise GridError("Invalid saved cooldown counters")
+        self.retry_at, self.next_quote_at = state["retry_at"], state["next_quote_at"]
+        self.quote_interval = max(self.quote_interval, min(6, state["quote_interval"]))
+        self.limited_path, self.failures = path, dict(failures)
+
+    def request(self, method, path, *, query=None, body=None, probe=False):
+        # Serialize admission with the response: queued callers cannot race past
+        # a 429 received by an earlier call. No sleeping on either venue here.
+        with self.lock:
+            return self._request(method, path, query=query, body=body, probe=probe)
+
+    def _request(self, method, path, *, query=None, body=None, probe=False):
         if (method, path) not in self.allowed:
             raise GridError("Endpoint is not permitted by the QQQ paper market client")
+        self.check_cooldown()
+        if method == "POST":
+            now = self.clock()
+            paired = self._batch_remaining == 1 and self._batch_probe and not probe
+            if self._batch_remaining == 0 or (now < self.next_quote_at and not paired):
+                raise RequestDeferred(self.venue, path, max(now + 1, self.next_quote_at), now)
         url = self.origin + path
         if query:
             url += "?" + urllib.parse.urlencode(query)
@@ -83,6 +167,11 @@ class _Transport:
             headers["Content-Type"] = "application/json"
         request = urllib.request.Request(url, data=payload, headers=headers, method=method)
         requested = self.clock()
+        if method == "POST":
+            self.next_quote_at = max(requested, self.next_quote_at) + self.quote_interval
+            if self._batch_remaining is not None:
+                self._batch_remaining = 1 if probe and self._batch_remaining == 2 else 0
+                self._batch_probe = probe
         try:
             with self.opener.open(request, timeout=10) as response:
                 raw = response.read(2_000_001)
@@ -103,13 +192,25 @@ class _Transport:
                     apparent_age = max(0, received - date_ts)
                     corrected_age = age + received - requested
                     source_ts = received - max(apparent_age, corrected_age)
+                self.failures.pop(path, None)  # A metadata GET cannot clear a quote POST's 429 streak.
+                if path == self.limited_path:
+                    self.retry_at, self.limited_path = 0.0, ""
                 return data, received, source_ts
         except urllib.error.HTTPError as error:
             code = error.code
+            retry = error.headers.get("Retry-After") if error.headers else None
             error.close()
-            raise GridError(f"Market API HTTP {code}; no simulated execution accepted") from None
+            if code == 429:
+                now = self.clock()
+                count = self.failures[path] = min(20, self.failures.get(path, 0) + 1)
+                self.retry_at = now + retry_delay(retry, now, min(900, 60 * 2 ** min(count - 1, 4)))
+                self.limited_path = path
+                if self.origin == ORIGIN:
+                    self.quote_interval = 6.0
+                raise RequestDeferred(self.venue, path, self.retry_at, now, limited=True) from None
+            raise GridError(f"{self.venue} {path}: Market API HTTP {code}; no simulated execution accepted") from None
         except (OSError, ValueError, TypeError, UnicodeError, OverflowError):
-            raise GridError("Market transport or JSON error; no simulated execution accepted") from None
+            raise GridError(f"{self.venue} {path}: Market transport or JSON error; no simulated execution accepted") from None
 
 
 class LighterClient:
@@ -282,10 +383,14 @@ Public /quotes/simple supplies quantity-specific indicative bid/ask prices.
         self.max_age_seconds = max_age_seconds
         self._market = None
         self._metadata_checked = None
+        self._last_quote = None
 
     def _metadata(self):
+        self.transport.check_cooldown()
         now = self.transport.clock()
-        if self._market is not None and self._metadata_checked is not None and 0 <= now - self._metadata_checked < 5:
+        if (self._market is not None and self._metadata_checked is not None and 0 <= now - self._metadata_checked < 30
+                and _fresh(self._market["metadata_ts"], now, 120)
+                and (self._market["closes_at"] is None or now < self._market["closes_at"])):
             return self._market
         data, received, source_ts = self.transport.request("GET", "/api/metadata/supported_assets", query={"cex_asset": VAR_SYMBOL})
         try:
@@ -327,17 +432,23 @@ Public /quotes/simple supplies quantity-specific indicative bid/ask prices.
         market = self._metadata()
         if not market["market_open"]:
             return {**market, "ready": False, "reason": "market_closed"}
-        quote = self.quote("0.01")
+        # Any fresh, validated US100 quote can provide the common mark/limits.
+        # Preserve its original time; actual simulated hedge fills still require
+        # a newly requested exact-quantity quote in that frame.
+        if self._last_quote and _fresh(self._last_quote["ts"], self.transport.clock(), min(9, self.max_age_seconds)):
+            return {**self._last_quote, **{k: market[k] for k in ("market_open", "closes_at", "close_only")},
+                    "is_probe": True, "probe_qty": self._last_quote["qty"]}
+        quote = self.quote("0.01", _probe=True)
         return {**quote, "is_probe": True, "probe_qty": quote["qty"]}
 
-    def quote(self, qty):
+    def quote(self, qty, *, _probe=False):
         quantity = _number(qty)
         market = self._metadata()
         if not market["market_open"] or (market["closes_at"] is not None and self.transport.clock() >= market["closes_at"]):
             raise GridError("US100 swap market is closed")
         path = "/api/quotes/simple"
         data, received, _ = self.transport.request("POST", path,
-            body={"instrument": dict(VAR_INSTRUMENT), "qty": _text(quantity)})
+            body={"instrument": dict(VAR_INSTRUMENT), "qty": _text(quantity)}, probe=_probe)
         try:
             if data["instrument"] != VAR_INSTRUMENT or _number(data["qty"]) != quantity:
                 raise GridError("US100 quote instrument or requested quantity mismatch")
@@ -365,10 +476,12 @@ Public /quotes/simple supplies quantity-specific indicative bid/ask prices.
             maximum = min(Decimal(side["max_qty"]) for side in limits.values())
             if not minimum <= quantity <= maximum:
                 raise GridError("US100 requested quantity is outside indicative limits")
-            return {**market, "bid": _text(bid), "ask": _text(ask), "mark": _text(mark),
+            result = {**market, "bid": _text(bid), "ask": _text(ask), "mark": _text(mark),
                     "qty": _text(quantity), "ts": quote_ts, "source_ts": quote_ts, "received_ts": received,
                     "source_time_kind": "exchange_quote_timestamp", "source": "variational_" + path.rsplit("/", 1)[1] + "_indicative",
                     "qty_limits": limits, "min_qty": _text(minimum), "max_qty": _text(maximum),
                     "size_step": _text(step), "ready": True, "reason": "", "is_probe": False}
+            self._last_quote = result
+            return result
         except (KeyError, TypeError, AttributeError, InvalidOperation):
             raise GridError("US100 indicative quote schema changed") from None

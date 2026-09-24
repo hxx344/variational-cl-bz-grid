@@ -1,10 +1,13 @@
 import copy
+from email.utils import formatdate
 from dataclasses import asdict, replace
+import io
 import json
 from pathlib import Path
 import tempfile
 from types import SimpleNamespace
 import unittest
+import urllib.error
 from unittest.mock import patch
 
 from variational_grid.comparison import Experiment
@@ -12,6 +15,7 @@ from variational_grid.models import D, Config, GridError
 from variational_grid.qqq_hedge import QQQConfig, QQQSettings, book_fill, exposure, hedge_target, initial_account, maker_step
 from variational_grid.qqq_comparison import QQQCohort, QQQExperiment, QQQFrame, QQQMarketFeed, read_qqq_dashboard
 from variational_grid.reset import process_reset, read_state, request_reset
+from variational_grid.qqq_market import LighterClient, VarSwapClient, RequestDeferred
 
 
 def quote(ts, qty=".01", mark="30000"):
@@ -28,6 +32,30 @@ def market(ts, trades=(), mark="100", bid=None, ask=None):
 
 def trade(identity, ts, price="99", qty="3", side="sell"):
     return {"id": str(identity), "ts": ts, "price": price, "qty": qty, "side": side}
+
+
+class BudgetedVar:
+    """Deterministic prices behind the real HTTP request budget."""
+    def __init__(self, now, fail=False, delay=0):
+        self.now, self.fail, self.calls, self.delay = now, fail, [], delay
+        self.transport = VarSwapClient(opener=self, clock=lambda: now[0]).transport
+
+    def open(self, request, timeout):
+        self.calls.append(json.loads(request.data)["qty"])
+        if self.fail:
+            raise urllib.error.HTTPError(request.full_url, 429, "limited", {"Retry-After": "90"}, io.BytesIO())
+        self.now[0] += self.delay
+        response = io.BytesIO(b"{}")
+        response.headers = {"Date": formatdate(self.now[0], usegmt=True)}
+        return response
+
+    def market(self):
+        self.transport.check_cooldown()
+        return quote(self.now[0])
+
+    def quote(self, qty):
+        self.transport.request("POST", "/api/quotes/simple", body={"qty": str(qty)})
+        return quote(self.now[0], qty)
 
 
 class MechanicsTests(unittest.TestCase):
@@ -256,8 +284,9 @@ class CohortTests(unittest.TestCase):
                 frame = feed.next(cohort)
             frame.data_kind = "synthetic"  # Injected test feed, never an actual public sample.
             result = cohort.ingest(frame)
-            self.assertEqual(len(var.calls), 3)
-            self.assertEqual(len(set(var.calls)), 3)
+            self.assertEqual(len(var.calls), 1)
+            self.assertEqual(frame.market["reason"], "Unavailable")
+            self.assertFalse(frame.market["allow_entries"])
             self.assertTrue(all(D(row["qqq"]["qty"]) == 1 and row["hedge_status"] == "hedge_quote_unavailable" for row in result["scenarios"]))
 
     def test_stale_lighter_cannot_rebalance_against_fresh_var(self):
@@ -274,6 +303,89 @@ class CohortTests(unittest.TestCase):
             self.assertIsNone(frame.market["var"])
             current = cohort.ingest(frame)
             self.assertEqual([r["us100"]["qty"] for r in current["scenarios"]], [r["us100"]["qty"] for r in prior["scenarios"]])
+
+    def test_quote_budget_rotates_accounts_and_never_reuses_execution_price(self):
+        now = [102]
+        var = BudgetedVar(now)
+        q = [market(102, [trade(1, 101)])]
+        feed = QQQMarketFeed(self.experiment, SimpleNamespace(snapshot=lambda: q[0]), var)
+        with QQQCohort(self.experiment) as cohort:
+            cohort.ingest(self.frame(cohort, 100))
+            for ts, expected in [(102, 1), (104, 1), (106, 2), (110, 3)]:
+                now[0] = ts
+                if ts != 102:
+                    q[0] = market(ts)
+                with patch("variational_grid.qqq_comparison.time.time", return_value=ts):
+                    observation = feed.next(cohort)
+                observation.data_kind = "synthetic"
+                rows = cohort.ingest(observation)["scenarios"]
+                self.assertEqual(sum(D(row["us100"]["qty"]) < 0 for row in rows), expected)
+                self.assertEqual(len(var.calls), expected)
+                self.assertTrue(all(D(row["qqq"]["qty"]) == 1 for row in rows))
+
+    def test_429_during_hedge_stops_batch_retains_fills_and_survives_reset_restart(self):
+        now = [102]
+        var = BudgetedVar(now, fail=True)
+        q = [market(102, [trade(1, 101)])]
+        lighter = SimpleNamespace(snapshot=lambda: q[0])
+        feed = QQQMarketFeed(self.experiment, lighter, var)
+        identity = self.experiment.identity()
+        with QQQCohort(self.experiment) as cohort:
+            cohort.ingest(self.frame(cohort, 100))
+            for ts in (102, 104, 106):
+                now[0] = ts
+                if ts != 102:
+                    q[0] = market(ts)
+                with patch("variational_grid.qqq_comparison.time.time", return_value=ts):
+                    observation = feed.next(cohort)
+                    dashboard = read_qqq_dashboard(self.experiment, "24h")
+                self.assertEqual(dashboard["rate_limits"], [{"venue": "Variational", "retry_at": 192}])
+                self.assertFalse(observation.market["allow_entries"])
+                self.assertIsNone(observation.market["var"])
+                self.assertEqual(observation.quotes, {})
+                observation.data_kind = "synthetic"
+                rows = cohort.ingest(observation)["scenarios"]
+                self.assertTrue(all(D(row["qqq"]["qty"]) == 1 and row["us100"]["qty"] == "0" for row in rows))
+            self.assertEqual(len(var.calls), 1)
+            request_reset(self.experiment, read_state(self.experiment)["generation"])
+            self.assertTrue(process_reset(cohort))
+            replacement = BudgetedVar(now)
+            restarted = QQQMarketFeed(self.experiment, lighter, replacement)
+            with patch("variational_grid.qqq_comparison.time.time", return_value=108):
+                observation = restarted.next(cohort)
+            self.assertIsNone(observation.market["var"])
+            self.assertEqual(replacement.calls, [])
+            self.assertEqual(self.experiment.identity(), identity)
+
+    def test_slow_exact_quote_does_not_drain_remaining_accounts_and_expire_the_frame(self):
+        now = [102]
+        var = BudgetedVar(now, delay=6)
+        q = market(102, [trade(1, 101)])
+        feed = QQQMarketFeed(self.experiment, SimpleNamespace(snapshot=lambda: q), var)
+        with QQQCohort(self.experiment) as cohort:
+            cohort.ingest(self.frame(cohort, 100))
+            with patch("variational_grid.qqq_comparison.time.time", side_effect=lambda: now[0]):
+                observation = feed.next(cohort)
+            self.assertEqual(len(var.calls), 1)
+            self.assertEqual(observation.ts, 108)
+            observation.data_kind = "synthetic"
+            rows = cohort.ingest(observation)["scenarios"]
+            self.assertEqual(sum(D(row["us100"]["qty"]) < 0 for row in rows), 1)
+            self.assertTrue(all(D(row["qqq"]["qty"]) == 1 for row in rows))
+
+    def test_lighter_failure_saves_cooldown_without_publishing_frame(self):
+        now = [102]
+        var = BudgetedVar(now)
+        def fail_lighter(request, timeout):
+            raise urllib.error.HTTPError(request.full_url, 429, "limited", {"Retry-After": "100"}, io.BytesIO())
+        lighter = LighterClient(opener=SimpleNamespace(open=fail_lighter), clock=lambda: now[0])
+        feed = QQQMarketFeed(self.experiment, lighter, var)
+        with QQQCohort(self.experiment) as cohort:
+            with self.assertRaises(RequestDeferred):
+                feed.next(cohort)
+            self.assertIsNone(cohort.latest())
+            self.assertEqual(json.loads((self.output / "market-cooldowns.json").read_text())["Lighter"]["retry_at"], 202)
+            self.assertEqual(var.calls, [])
 
     def test_small_residual_explains_quantity_limit_instead_of_claiming_neutrality(self):
         with QQQCohort(self.experiment) as cohort:

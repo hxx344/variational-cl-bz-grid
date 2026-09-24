@@ -90,3 +90,11 @@ test('account, range and detail views round-trip through existing URL contract',
   assert.deepEqual(M.state('?strategy=qqq-005-h2&range=7d&view=trades',['qqq-005-h2']),{strategy:'qqq-005-h2',range:'7d',view:'trades'});
   assert.deepEqual(M.state('?strategy=bad&range=forever&view=secret',['qqq-005-h2']),{strategy:'all',range:'24h',view:'positions'});
 });
+
+test('rate limit countdown uses server time and elapsed time, never claims recovery at zero', () => {
+  const data = {server_ts:100,rate_limits:[{venue:'Variational',retry_at:160},{venue:'Lighter',retry_at:190}]};
+  assert.equal(Q.cooldownNotice(data,10),'Variational HTTP 429 限流：50 秒后重试；Lighter HTTP 429 限流：80 秒后重试');
+  assert.match(Q.cooldownNotice(data,61),/Variational HTTP 429 限流：冷却结束，等待下一次行情结果/);
+  assert.equal(Q.cooldownNotice({server_ts:100},0),'');
+  assert.equal(Q.cooldownNotice({server_ts:100,rate_limits:[{venue:'invalid',retry_at:1000}]},0),'');
+});

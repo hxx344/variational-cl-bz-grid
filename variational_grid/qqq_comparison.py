@@ -1,6 +1,5 @@
 """Journaled nine-account QQQ / US100 paper experiment and public-feed runner."""
-from concurrent.futures import ThreadPoolExecutor
-from contextlib import closing
+from contextlib import closing, nullcontext
 from dataclasses import asdict, dataclass
 import base64
 import html
@@ -16,6 +15,7 @@ from types import SimpleNamespace
 from .comparison import Cohort, write_json
 from .models import D, GridError, dec, utc
 from .qqq_hedge import QQQConfig, QQQEngine, QQQSettings, QQQStore, digest, encoded, hedge_target
+from .qqq_market import RequestDeferred
 
 
 def summary_record(summary):
@@ -237,8 +237,40 @@ class QQQMarketFeed:
         self.experiment = experiment
         self.lighter = lighter or LighterClient()
         self.var = var or VarSwapClient()
+        self._quote_cursor = 0
+        self._cooldown_path = experiment.output / "market-cooldowns.json"
+        self._saved_cooldowns = None
+        if self._cooldown_path.exists():
+            try:
+                saved = json.loads(self._cooldown_path.read_text(encoding="utf-8"))
+                if not isinstance(saved, dict):
+                    raise ValueError()
+                for client in (self.lighter, self.var):
+                    transport = getattr(client, "transport", None)
+                    if transport and transport.venue in saved:
+                        transport.restore(saved[transport.venue])
+            except (OSError, ValueError, TypeError):
+                raise GridError("Cannot read saved market cooldowns") from None
+
+    def save_cooldowns(self):
+        state = {client.transport.venue: client.transport.state() for client in (self.lighter, self.var)
+                 if getattr(client, "transport", None)}
+        text = encoded(state) + "\n"
+        if state and text != self._saved_cooldowns:
+            write_export(self._cooldown_path, text)
+            self._saved_cooldowns = text
 
     def next(self, cohort):
+        try:
+            transport = getattr(self.var, "transport", None)
+            with transport.quote_batch() if transport else nullcontext():
+                return self._next(cohort)
+        finally:
+            # Persist even when Lighter fails before a frame can be published.
+            # The ledger reset deliberately leaves this transport state intact.
+            self.save_cooldowns()
+
+    def _next(self, cohort):
         q = self.lighter.snapshot()
         reason, var = q.get("reason", ""), None
         try:
@@ -259,19 +291,30 @@ class QQQMarketFeed:
             reason = "Venue in close-only mode; maker entries paused"
         market = {"lighter": q, "var": var, "allow_entries": bool(var and q["ready"] and not q["gap"] and not q.get("close_only", False) and not var.get("close_only", False)), "reason": reason}
         frame = cohort.prepare_frame(now, market)
-        quantities = set()
+        quantities = {}
+        names = list(frame.plans)
+        ordered = names[self._quote_cursor:] + names[:self._quote_cursor]
         if var:
-            for name, plan in frame.plans.items():
+            for name in ordered:
+                plan = frame.plans[name]
                 change = abs(dec(plan["target"]) - dec(cohort.stores[name].account()["us100"]["qty"]))
                 if change and dec(var["min_qty"]) <= change <= dec(var["max_qty"]):
-                    quantities.add(format(change.normalize(), "f"))
-        def fetch(qty):
+                    quantities.setdefault(format(change.normalize(), "f"), name)
+        collected = {}
+        for qty, name in quantities.items():
             try:
-                return qty, self.var.quote(dec(qty))
-            except GridError:
-                return qty, None
-        with ThreadPoolExecutor(max_workers=4) as executor:
-            collected = dict(executor.map(fetch, sorted(quantities)))
+                collected[qty] = self.var.quote(dec(qty))
+            except RequestDeferred as error:
+                market["reason"] = str(error)
+                if error.limited:
+                    market.update(var=None, allow_entries=False)
+                    self._quote_cursor = (names.index(name) + 1) % len(names)
+                break  # Do not burst the remaining quantities into a cooling venue.
+            except GridError as error:
+                market.update(reason=str(error), allow_entries=False)
+                self._quote_cursor = (names.index(name) + 1) % len(names)
+                break
+            self._quote_cursor = (names.index(name) + 1) % len(names)
         # Network latency is observable. Rebuild targets at the final observation time;
         # use only quotes actually fetched for the resulting exact signed change.
         now = time.time()
@@ -297,8 +340,7 @@ def run_qqq(args, experiment):
         while not stop.exists():
             started = time.monotonic()
             try:
-                if process_reset(cohort):
-                    feed = QQQMarketFeed(experiment)
+                process_reset(cohort)  # Reset accounts without bypassing venue cooldowns.
                 frame = feed.next(cohort)
             except GridError as error:
                 failures += 1
@@ -327,6 +369,14 @@ def read_qqq_dashboard(experiment, window):
     result = {"kind": "qqq_hedge", "server_ts": time.time(), "runtime": {"status": "starting"}, "summary": None,
               "reset": read_state(experiment), "details_available": False, "positions": [], "trades": [],
               "history": {"range": window, "names": [], "source_count": 0, "points": []}}
+    try:
+        saved = json.loads((experiment.output / "market-cooldowns.json").read_text(encoding="utf-8"))
+        result["rate_limits"] = [{"venue": venue, "retry_at": state["retry_at"]} for venue, state in saved.items()
+                                 if venue in {"Lighter", "Variational"} and isinstance(state, dict)
+                                 and type(state.get("retry_at")) in (int, float) and math.isfinite(state["retry_at"])
+                                 and state["retry_at"] > 0]
+    except (OSError, ValueError, AttributeError):
+        result["rate_limits"] = []
     if result["reset"] and result["reset"]["status"] in {"archiving", "clearing"}:
         result["runtime"] = {"status": "resetting"}
         return result

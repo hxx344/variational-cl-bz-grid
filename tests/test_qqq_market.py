@@ -7,7 +7,7 @@ from unittest.mock import patch
 import urllib.error
 
 from variational_grid.models import GridError
-from variational_grid.qqq_market import LighterClient, VarSwapClient, VAR_INSTRUMENT
+from variational_grid.qqq_market import LighterClient, VarSwapClient, VAR_INSTRUMENT, RequestDeferred, retry_delay
 
 
 NOW = 1790269000
@@ -85,9 +85,13 @@ class LighterMarketTests(unittest.TestCase):
 
     def test_http_cache_age_uses_maximum_not_sum_and_accounts_for_latency(self):
         # CloudFront preserves Date; Age repeats its elapsed time.
-        opener = Opener([Response({}, NOW - 6, age=6)])
-        times = iter([NOW - 1, NOW])
-        client = LighterClient(opener=opener, clock=lambda: next(times))
+        now = [NOW - 1]
+        class SlowOpener(Opener):
+            def open(self, request, timeout):
+                now[0] += 1
+                return super().open(request, timeout)
+        opener = SlowOpener([Response({}, NOW - 6, age=6)])
+        client = LighterClient(opener=opener, clock=lambda: now[0])
         _, received, source = client.transport.request("GET", "/api/v1/orderBookDetails")
         self.assertEqual(received - source, 7)  # six cached seconds + one in transit
         # Cloudflare can refresh Date; Age must still protect against stale data.
@@ -190,6 +194,96 @@ class LighterMarketTests(unittest.TestCase):
 
 
 class VarSwapMarketTests(unittest.TestCase):
+    def test_delayed_quotes_cannot_starve_exact_size_behind_repeated_probes(self):
+        now = [NOW]
+        posts = []
+        class DelayedQuoteOpener:
+            def open(self, request, timeout):
+                if request.method == "GET":
+                    return Response(var_metadata(), now[0])
+                qty = json.loads(request.data)["qty"]
+                posts.append((now[0] - NOW, qty))
+                return Response(var_quote(qty, now[0] - 4), now[0])
+        client = VarSwapClient(opener=DelayedQuoteOpener(), clock=lambda: now[0])
+        client.transport.quote_interval = 6  # Post-429 pace, quote timestamp lags four seconds.
+        for elapsed in range(0, 33, 2):
+            now[0] = NOW + elapsed
+            with client.transport.quote_batch():
+                try:
+                    client.market()
+                    client.quote("0.02")
+                    with self.assertRaises(RequestDeferred):
+                        client.quote("0.03")
+                except RequestDeferred:
+                    pass
+        self.assertEqual(posts, [(0, "0.01"), (0, "0.02"), (12, "0.01"), (12, "0.02"), (24, "0.01"), (24, "0.02")])
+        # Batch privilege ends even when the block exits via an exception.
+        now[0] = NOW + 34
+        with self.assertRaises(RequestDeferred):
+            client.quote("0.03")
+
+    def test_slow_execution_response_cannot_admit_more_sizes_in_same_frame(self):
+        now = [NOW]
+        posts = []
+        class SlowQuoteOpener:
+            def open(self, request, timeout):
+                if request.method == "GET":
+                    return Response(var_metadata(), now[0])
+                qty = json.loads(request.data)["qty"]
+                posts.append(qty)
+                if qty != "0.01":
+                    now[0] += 6
+                return Response(var_quote(qty, now[0]), now[0])
+        client = VarSwapClient(opener=SlowQuoteOpener(), clock=lambda: now[0])
+        client.market()
+        now[0] += 4
+        with client.transport.quote_batch():
+            self.assertEqual(client.market()["ts"], NOW)
+            self.assertEqual(client.quote("0.02")["ts"], NOW + 10)
+            with self.assertRaises(RequestDeferred):
+                client.quote("0.03")
+        self.assertEqual(posts, ["0.01", "0.02"])
+
+    def test_probe_cache_preserves_timestamp_and_execution_always_refetches(self):
+        now = [NOW]
+        opener = Opener([Response(var_metadata()), Response(var_quote()), Response(var_quote("0.02", NOW + 3)),
+                         Response(var_quote(now=NOW + 13))])
+        client = VarSwapClient(opener=opener, clock=lambda: now[0])
+        client.market()
+        now[0] += 2
+        self.assertEqual(client.market()["ts"], NOW)
+        with self.assertRaises(RequestDeferred) as caught:
+            client.quote("0.01")  # Cached probe is not a new execution price.
+        self.assertFalse(caught.exception.limited)
+        self.assertEqual(len(opener.requests), 2)
+        now[0] += 1
+        self.assertEqual(client.quote("0.02")["ts"], NOW + 3)
+        now[0] = NOW + 10
+        self.assertEqual(client.market()["ts"], NOW + 3)
+        now[0] = NOW + 13
+        self.assertEqual(client.market()["ts"], NOW + 13)
+        self.assertEqual([r.method for r in opener.requests], ["GET", "POST", "POST", "POST"])
+
+    def test_metadata_cache_respects_source_age_and_session_close(self):
+        now = [NOW]
+        closing = var_metadata()
+        closing["US100S"][0]["trading_sessions"][0]["close"] = datetime.fromtimestamp(NOW + 4, timezone.utc).isoformat()
+        opener = Opener([Response(closing), Response(var_quote()), Response(closing, NOW + 4)])
+        client = VarSwapClient(opener=opener, clock=lambda: now[0])
+        client.market()
+        now[0] += 4
+        self.assertFalse(client.market()["market_open"])
+        self.assertEqual([r.method for r in opener.requests], ["GET", "POST", "GET"])
+        # Local cache age alone cannot prolong the source's 120-second TTL.
+        now[0] = NOW
+        opener = Opener([Response(var_metadata(), NOW - 119), Response(var_quote()),
+                         Response(var_metadata(), NOW + 2)])
+        client = VarSwapClient(opener=opener, clock=lambda: now[0])
+        client.market()
+        now[0] += 2
+        client.market()
+        self.assertEqual([r.method for r in opener.requests], ["GET", "POST", "GET"])
+
     def test_public_probe_uses_real_swap_units_and_never_opens_session(self):
         opener = Opener([Response(var_metadata()), Response(var_quote())])
         with patch("variational_grid.client.Client.session", side_effect=AssertionError("must not read secrets")):
@@ -261,6 +355,83 @@ class VarSwapMarketTests(unittest.TestCase):
         with self.assertRaisesRegex(GridError, "HTTP 302") as caught:
             client.market()
         self.assertNotIn("secret", str(caught.exception))
+
+class MarketRateLimitTests(unittest.TestCase):
+    @staticmethod
+    def error(retry=None):
+        return urllib.error.HTTPError("https://omni.variational.io/api/quotes/simple", 429, "private body",
+                                      {} if retry is None else {"Retry-After": retry}, io.BytesIO(b"private body"))
+
+    def test_retry_after_seconds_date_and_fallback(self):
+        for header, expected in [("1800", 1800), (formatdate(NOW + 3600, usegmt=True), 3600),
+                                 (None, 60), ("garbage", 60), ("-3", 60), ("0", 60),
+                                 (formatdate(NOW - 10, usegmt=True), 60), ("5", 60)]:
+            with self.subTest(header=header):
+                self.assertEqual(retry_delay(header, NOW, 60), expected)
+
+    def test_quote_429_stops_all_origin_calls_but_not_other_venue(self):
+        now = [NOW]
+        error = self.error("1800")
+        opener = Opener([error, Response({}, NOW + 1800)])
+        transport = VarSwapClient(opener=opener, clock=lambda: now[0]).transport
+        with self.assertRaisesRegex(RequestDeferred, "Variational.*HTTP 429") as caught:
+            transport.request("POST", "/api/quotes/simple", body={})
+        self.assertNotIn("private", str(caught.exception))
+        for offset in (2, 60, 1799):
+            now[0] = NOW + offset
+            for method, path in [("POST", "/api/quotes/simple"), ("GET", "/api/metadata/supported_assets")]:
+                with self.assertRaises(RequestDeferred):
+                    transport.request(method, path)
+        self.assertEqual(len(opener.requests), 1)
+        lighter = LighterClient(opener=Opener([Response({})]), clock=lambda: NOW).transport
+        lighter.request("GET", "/api/v1/orderBookDetails")
+        now[0] = NOW + 1800
+        transport.request("POST", "/api/quotes/simple", body={})
+        self.assertEqual(len(opener.requests), 2)
+        self.assertEqual(transport.failures, {})
+        self.assertEqual(transport.retry_at, 0)
+        self.assertEqual(transport.quote_interval, 6)
+
+    def test_metadata_success_cannot_reset_quote_backoff_and_restart_restores_it(self):
+        now = [NOW]
+        opener = Opener([self.error(), Response({}, NOW + 60), self.error()])
+        transport = VarSwapClient(opener=opener, clock=lambda: now[0]).transport
+        with self.assertRaises(RequestDeferred):
+            transport.request("POST", "/api/quotes/simple")
+        now[0] += 60
+        transport.request("GET", "/api/metadata/supported_assets")
+        with self.assertRaises(RequestDeferred) as caught:
+            transport.request("POST", "/api/quotes/simple")
+        self.assertEqual(caught.exception.retry_at, NOW + 180)
+        restored_opener = Opener([])
+        restored = VarSwapClient(opener=restored_opener, clock=lambda: now[0]).transport
+        restored.restore(json.loads(json.dumps(transport.state())))
+        with self.assertRaises(RequestDeferred):
+            restored.request("GET", "/api/metadata/supported_assets")
+        self.assertEqual(restored_opener.requests, [])
+        self.assertEqual(restored.failures["/api/quotes/simple"], 2)
+        with self.assertRaises(GridError):
+            restored.restore({"venue": "Variational"})
+
+    def test_lighter_429_gates_book_and_trade_requests(self):
+        opener = Opener([self.error()])
+        client = LighterClient(opener=opener, clock=lambda: NOW)
+        for _ in range(3):
+            with self.assertRaisesRegex(RequestDeferred, "Lighter.*429"):
+                client.snapshot()
+        self.assertEqual(len(opener.requests), 1)
+
+    def test_probe_batch_credit_never_bypasses_origin_cooldown(self):
+        opener = Opener([self.error()])
+        transport = VarSwapClient(opener=opener, clock=lambda: NOW).transport
+        with transport.quote_batch():
+            with self.assertRaises(RequestDeferred):
+                transport.request("POST", "/api/quotes/simple", probe=True)
+            with self.assertRaises(RequestDeferred) as caught:
+                transport.request("POST", "/api/quotes/simple")
+            self.assertTrue(caught.exception.limited)
+        self.assertEqual(len(opener.requests), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

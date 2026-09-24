@@ -57,7 +57,12 @@
     };
     return statuses[row?.hedge_status] || (row?.hedge_pending ? '待对冲 · 原因未提供' : '无待处理对冲');
   }
-  const helpers = {percent, label, encoding, reconciliation, sampleIndex, exposureDomain, historyValue, freshness, marketStatus, hedgeStatus};
+  function cooldownNotice(data, elapsedSeconds) {
+    const now = Number(data?.server_ts) + Math.max(0, elapsedSeconds);
+    return (data?.rate_limits || []).filter(r => ['Lighter', 'Variational'].includes(r.venue) && M.finite(r.retry_at))
+      .map(r => `${r.venue} HTTP 429 限流：${Number(r.retry_at) > now ? Math.ceil(Number(r.retry_at) - now) + ' 秒后重试' : '冷却结束，等待下一次行情结果'}`).join('；');
+  }
+  const helpers = {percent, label, encoding, reconciliation, sampleIndex, exposureDomain, historyValue, freshness, marketStatus, hedgeStatus, cooldownNotice};
   if (typeof module !== 'undefined' && module.exports) {module.exports = helpers; return;}
   root.QQQModel = helpers;
   const $ = id => document.getElementById(id), E = M.escape;
@@ -99,9 +104,11 @@
     $('market-status').textContent = marketStatus(data, f, disconnected);
     $('freshness').textContent = f.age === null ? '等待第一份有效采样' : `${M.date(s.ts)} · ${Math.floor(f.age)} 秒前 · 每 ${M.number(s.poll_seconds, 0)} 秒采样`;
     let notice = '';
+    const cooldown = cooldownNotice(data, (Date.now() - received) / 1000);
     if (disconnected) notice = '无法连接监控服务，保留上次成功读取的数据。页面会自动重试。';
-    else if (runtime === 'paused') notice = '行情暂停，保留最近有效采样：' + sourceReason(data.runtime.reason);
     else if (runtime === 'stopped') notice = '模拟进程已停止，以下为最后保存的数据。';
+    else if (cooldown) notice = cooldown + '。暂停新网格入场，保留已有仓位和已确认的模拟成交。';
+    else if (runtime === 'paused') notice = '行情暂停，保留最近有效采样：' + sourceReason(data.runtime.reason);
     else if (f.stale) notice = '行情已过期，收益和仓位估值停留在最后有效采样。';
     else if (s?.market?.gap) notice = '公共成交序列存在缺口；保留已知仓位与损益，暂停新网格入场。';
     else if (s?.market?.source_reason) notice = sourceReason(s.market.source_reason);
