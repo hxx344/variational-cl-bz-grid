@@ -198,10 +198,12 @@ sudo bash install.sh --compare
 比较模式自动安装并启动 `variational-grid-web.service`，只监听服务器 `127.0.0.1:9876`。在**自己的电脑**打开 PowerShell 或终端，替换服务器登录名和 IP 后执行：
 
 ```powershell
-ssh -N -o ExitOnForwardFailure=yes -L 18765:127.0.0.1:9876 root@你的服务器IP
+ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=6 -L 127.0.0.1:18765:127.0.0.1:9876 root@你的服务器IP
 ```
 
 保持此终端打开，浏览器访问 [服务器监控页（SSH 转发）](http://127.0.0.1:18765/)。不需要域名，也不需要开放 9876 公网端口。升级已有服务器仍然只需重复上方一键命令，页面显示当前配置所指向的实验；发生策略迁移时显示新实验，旧账本仍在原目录。网页本身不要求粘贴令牌。
+
+升级时保留原隧道，无需重复创建。Windows 需要断线自动恢复时，使用下方的 [SSH 隧道恢复脚本](#ssh-tunnel-recovery)。
 
 - 参数：`/etc/variational-grid/config.json`
 - 会话、账本：`/var/lib/variational-grid/`；可改文件名，但服务配置要求路径保持在该目录内。
@@ -294,7 +296,7 @@ curl -fsSL https://raw.githubusercontent.com/hxx344/variational-cl-bz-grid/main/
 库存模式复用 `variational-grid.service` 和 `variational-grid-web.service`，网页仍只监听服务器 `127.0.0.1:9876`。在自己的电脑保持以下 SSH 转发，再打开 [库存监控页](http://127.0.0.1:18765/)：
 
 ```powershell
-ssh -N -o ExitOnForwardFailure=yes -L 18765:127.0.0.1:9876 root@你的服务器IP
+ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=6 -L 127.0.0.1:18765:127.0.0.1:9876 root@你的服务器IP
 ```
 
 也可以在项目目录生成三类独立合成路径，用于检查组合成交、库存调整与损益口径：
@@ -371,7 +373,7 @@ curl -fsSL https://raw.githubusercontent.com/hxx344/variational-cl-bz-grid/main/
 网页沿用服务 `variational-grid-web.service`，监听服务器 `127.0.0.1:9876`。在自己电脑保持SSH转发：
 
 ```bash
-ssh -N -o ExitOnForwardFailure=yes -L 18765:127.0.0.1:9876 USER@SERVER_IP
+ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=6 -L 127.0.0.1:18765:127.0.0.1:9876 USER@SERVER_IP
 ```
 
 浏览器打开 [监控页](http://127.0.0.1:18765/)。各账户图表、两腿损益与成交量分别显示；新三组的敞口图单位为USDC，阈值线为±3000，旧百分比实验保持原单位。剥头皮卡片显示采样时的开仓阶段、冷却剩余、价格条件、开仓单和独立止盈单数量、占用批次及候选价格；服务停止时等待值保持最后采样值。
@@ -384,3 +386,18 @@ python -m variational_grid compare-reset --experiments qqq-hedge.example.json --
 ```
 
 服务器命令将实验路径换成 `/etc/variational-grid/qqq-hedge.json`。重置先归档当前全部账户账本，不产生模拟平仓。修改间距、止盈、开仓等待、金额阈值、费用或半点差须使用新的 `output_dir`；刷新周期与缓存上限可调整，逐帧记录实际采用的口径。需复查旧模拟时，可在另一个端口以备份配置启动 dashboard。
+
+<a id="ssh-tunnel-recovery"></a>
+### SSH 隧道断线恢复（Windows）
+
+`client_loop: send disconnect: Connection reset` 表示 SSH 传输连接被重置，需要重新建立连接。它与网页服务重启期间的 `channel ... connect failed: Connection refused` 不同：后者通常只影响一次转发请求，SSH 进程仍在，网页会继续重试。根据 [OpenSSH 文档](https://man.openbsd.org/ssh_config#ExitOnForwardFailure)，`ExitOnForwardFailure` 不会因转发目标暂时无法连接而关闭已有 SSH 连接。安装脚本仅重启发生变化的模拟及网页服务，没有重启 SSH 或网络服务的命令；历史重置原因仍需结合断线时的服务器和网络日志判断。
+
+`scripts/dashboard-tunnel.ps1` 在本机保持 SSH 保活，对明确的连接重置、超时或传输关闭按 5／10／20／40／60 秒重连，最长退避 60 秒。身份验证、主机指纹、端口占用及未知错误会停止并显示原因。保活不能保证网络不断线；此脚本负责断线恢复。网页服务尚未启动时，隧道可能已经建立，但页面仍需等服务恢复。
+
+在**自己电脑的 PowerShell** 执行，替换 `USER@SERVER_IP`。下面保留本地 **9876**，浏览器继续访问 `http://127.0.0.1:9876/`；如果原本使用本地 18765，将末尾端口改为 18765。首次换用脚本前，先在旧隧道窗口按 Ctrl+C；脚本不会关闭占用端口的其他进程。
+
+```powershell
+$tunnelScript = Join-Path $env:TEMP 'variational-dashboard-tunnel.ps1'; Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/hxx344/variational-cl-bz-grid/main/scripts/dashboard-tunnel.ps1' -OutFile $tunnelScript; powershell.exe -NoProfile -ExecutionPolicy Bypass -File $tunnelScript -SshHost USER@SERVER_IP -LocalPort 9876
+```
+
+已有本地仓库也可直接运行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\dashboard-tunnel.ps1 -SshHost USER@SERVER_IP -LocalPort 9876`。SSH 别名、认证方式和服务器端口沿用用户已有 SSH 配置；特殊 SSH 端口可加 `-SshPort 2222`。不修改全局执行策略或 SSH 配置，不保存密码或私钥，不关闭主机指纹检查。密码登录在每次重连时可能需要重新输入；密钥或 ssh-agent 登录可自动完成。保留窗口，Ctrl+C 停止脚本；此本机改动无需重新部署服务器。

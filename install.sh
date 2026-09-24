@@ -674,8 +674,11 @@ if [[ $mode != run ]]; then
   printf 'Experiments: %s/%s\n' "$conf" "$experiment_name"
   printf 'Report: <output_dir from %s>/public/index.html\n' "$experiment_name"
   echo 'Dashboard: run this on your own computer (keep the terminal open):'
-  echo '  ssh -N -o ExitOnForwardFailure=yes -L 18765:127.0.0.1:9876 USER@SERVER_IP'
+  echo '  ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=6 -L 127.0.0.1:18765:127.0.0.1:9876 USER@SERVER_IP'
   echo 'Then open http://127.0.0.1:18765/ in your browser. No public web port is required.'
+  echo 'Keep using an existing tunnel after upgrade; do not open another on the same local port.'
+  echo 'Windows reconnect helper: https://github.com/hxx344/variational-cl-bz-grid#ssh-tunnel-recovery'
+  echo 'A dashboard restart may briefly interrupt HTTP; an SSH Connection reset requires reconnecting the SSH transport.'
   echo 'Dashboard logs: journalctl -u variational-grid-web -f'
 fi
 echo 'Logs: journalctl -u variational-grid -f'
