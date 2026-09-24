@@ -200,6 +200,10 @@ def main(argv=None):
     sub.add_argument("--output", default="data/inventory-demo")
     sub.add_argument("--trajectory", choices=("oscillation", "trend", "divergence"), default="oscillation")
     sub.set_defaults(function=demo_inventory)
+    from .qqq_comparison import demo_qqq
+    sub = commands.add_parser("qqq-demo", help="Synthetic QQQ / US100 paper comparison, not a backtest")
+    sub.add_argument("--output", default="data/qqq-demo")
+    sub.set_defaults(function=demo_qqq)
     from .comparison import run_comparison, comparison_status, stop_comparison
     for name, function in (("compare", run_comparison), ("compare-status", comparison_status), ("compare-stop", stop_comparison)):
         sub = commands.add_parser(name)

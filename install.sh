@@ -6,7 +6,7 @@ requested_mode=
 cleanup_only=0
 usage() {
   cat <<'HELP'
-Usage: install.sh [--compare|--inventory|--single|--cleanup|--help]
+Usage: install.sh [--compare|--inventory|--qqq-hedge|--single|--cleanup|--help]
 Debian 12+ / Ubuntu 24.04+, with systemd and Python 3.11+.
 New installs run the 0.5% / 1% / 2% paper comparison by default.
 Grid levels and paper margin budgets are unlimited, with 100x margin estimates.
@@ -17,10 +17,12 @@ Earlier seven-day centers migrate to three days with separate preserved ledgers.
 Unchanged dependencies, validated code and running services are reused.
   --compare  Start the three-grid comparison (also switches existing installs).
   --inventory  Start the five-scenario inventory comparison with its own ledgers.
+  --qqq-hedge  Start the nine-scenario Lighter QQQ / Variational US100 paper comparison.
   --single   Start one grid using config.json.
   --cleanup  Reclaim obsolete deployments without downloading or restarting.
   --help     Show this help without installing anything.
-The first install asks for vr-token with hidden input; no wallet key is needed.
+CL/BZ modes ask for vr-token with hidden input; QQQ hedge uses public market data.
+No wallet key is needed.
 HELP
 }
 if [[ $# -gt 1 ]]; then
@@ -29,6 +31,7 @@ fi
 case ${1:-} in
   --compare) requested_mode=compare ;;
   --inventory) requested_mode=inventory ;;
+  --qqq-hedge) requested_mode=qqq-hedge ;;
   --single) requested_mode=run ;;
   --cleanup) cleanup_only=1 ;;
   --help|-h) usage; exit 0 ;;
@@ -65,7 +68,7 @@ class DeploymentStorage:
             self.protect(installer_source)
         # Preserve any configured path, including symlinks to a release. Config is
         # parsed as data; neither credentials nor configuration values are printed.
-        for name in ('config.json', 'inventory-base.json', 'experiments.json', 'inventory.json'):
+        for name in ('config.json', 'inventory-base.json', 'experiments.json', 'inventory.json', 'qqq-hedge.json'):
             path = self.conf / name
             self.protect(path)
             if not path.exists():
@@ -174,7 +177,7 @@ class DeploymentStorage:
         # retained legacy release so a no-op upgrade still reuses validation.
         result = subprocess.run(['git', '-C', str(self.source), 'ls-tree', '-r', release.name, '--',
                                  'variational_grid', 'tests', 'install.sh', 'config.example.json',
-                                 'experiments.example.json', 'inventory.example.json',
+                                 'experiments.example.json', 'inventory.example.json', 'qqq-hedge.example.json',
                                  'pyproject.toml'], capture_output=True)
         if result.returncode:
             return None
@@ -330,12 +333,14 @@ fi
 python3 -c 'import sys; assert sys.version_info >= (3, 11), "Python 3.11+ required (Debian 12+ / Ubuntu 24.04+)"'
 
 mode=${requested_mode:-$(cat "$conf/mode" 2>/dev/null || echo compare)}
-[[ $mode == run || $mode == compare || $mode == inventory ]] || { echo 'Invalid saved service mode.' >&2; exit 1; }
+[[ $mode == run || $mode == compare || $mode == inventory || $mode == qqq-hedge ]] || { echo 'Invalid saved service mode.' >&2; exit 1; }
 experiment_name=experiments.json
 config_name=config.json
 if [[ $mode == inventory ]]; then
   experiment_name=inventory.json
   config_name=inventory-base.json
+elif [[ $mode == qqq-hedge ]]; then
+  experiment_name=qqq-hedge.json
 fi
 
 id "$account" >/dev/null 2>&1 || useradd --system --home-dir "$state" --shell /usr/sbin/nologin "$account"
@@ -363,7 +368,7 @@ release="$app/releases/$revision"
 # Docs-only revisions can reuse a successful result; failed runs never write it.
 validation_key=$({
   python3 --version
-  git -C "$app/source" ls-tree -r "$revision" -- variational_grid tests install.sh config.example.json experiments.example.json inventory.example.json pyproject.toml
+  git -C "$app/source" ls-tree -r "$revision" -- variational_grid tests install.sh config.example.json experiments.example.json inventory.example.json qqq-hedge.example.json pyproject.toml
 } | sha256sum | cut -d ' ' -f1)
 install -d -m 755 "$app/validated"
 validate_release() {
@@ -427,6 +432,17 @@ Path(sys.argv[2]).write_text(json.dumps(data, indent=2) + '\n')
 PY
   chmod 644 "$conf/inventory.json"
 fi
+if [[ $mode == qqq-hedge && ! -f "$conf/qqq-hedge.json" ]]; then
+  python3 - "$release/qqq-hedge.example.json" "$conf/qqq-hedge.json" <<'PY'
+import json, sys
+from pathlib import Path
+data = json.loads(Path(sys.argv[1]).read_text())
+data['base_config'] = '/etc/variational-grid/config.json'
+data['output_dir'] = '/var/lib/variational-grid/qqq-hedge'
+Path(sys.argv[2]).write_text(json.dumps(data, indent=2) + '\n')
+PY
+  chmod 644 "$conf/qqq-hedge.json"
+fi
 # Validate preserved config before switching the running version.
 (cd "$release" && python3 - "$mode" <<'PY'
 import json, sys
@@ -436,33 +452,44 @@ from variational_grid.cli import configuration
 from variational_grid.comparison import Experiment
 base_path = Path('/etc/variational-grid') / ('inventory-base.json' if sys.argv[1] == 'inventory' else 'config.json')
 config = configuration(base_path)
-if sys.argv[1] in ('compare', 'inventory'):
-    name = 'inventory.json' if sys.argv[1] == 'inventory' else 'experiments.json'
+if sys.argv[1] in ('compare', 'inventory', 'qqq-hedge'):
+    name = {'compare': 'experiments.json', 'inventory': 'inventory.json', 'qqq-hedge': 'qqq-hedge.json'}[sys.argv[1]]
     path = Path('/etc/variational-grid') / name
-    if sys.argv[1] == 'inventory' and json.loads(path.read_text()).get('kind') != 'inventory':
+    spec = json.loads(path.read_text())
+    if sys.argv[1] == 'inventory' and spec.get('kind') != 'inventory':
         raise SystemExit('Inventory service requires kind=inventory')
+    if sys.argv[1] == 'qqq-hedge' and spec.get('kind') != 'qqq_hedge':
+        raise SystemExit('QQQ hedge service requires kind=qqq_hedge')
     experiment = Experiment.load(path)
     expected = replace(config, center_hours=72, max_levels=None, max_margin_fraction=None) if sys.argv[1] == 'inventory' else config
-    if experiment.base != expected:
+    if sys.argv[1] == 'qqq-hedge':
+        # Keep the schema's base reference stable; public QQQ/US100 feeds do not
+        # use the legacy economics, session or single-strategy state file.
+        valid_base = (path.parent / spec['base_config']).resolve() == base_path.resolve()
+    else:
+        valid_base = experiment.base == expected
+    if not valid_base:
         raise SystemExit(f'Service experiments must use {base_path}')
     output = experiment.output
     if output == Path('/var/lib/variational-grid') or not output.is_relative_to('/var/lib/variational-grid'):
         raise SystemExit('Service experiment output must stay inside /var/lib/variational-grid')
 root = Path('/var/lib/variational-grid').resolve()
-for value in (config.session_file, config.state_file):
+for value in (() if sys.argv[1] == 'qqq-hedge' else (config.session_file, config.state_file)):
     path = Path(value).resolve()
     if path == root or not path.is_relative_to(root):
         raise SystemExit('Service session_file and state_file must stay inside /var/lib/variational-grid')
 PY
 )
-if ! (cd "$release" && runuser -u "$account" -- python3 -m variational_grid check-session --config "$conf/$config_name"); then
+if [[ $mode == qqq-hedge ]]; then
+  echo 'QQQ / US100 public quantity-specific indicative quotes selected; no login session is required.'
+elif ! (cd "$release" && runuser -u "$account" -- python3 -m variational_grid check-session --config "$conf/$config_name"); then
   echo 'A valid login session is needed for quantity-specific indicative quotes; public candles and statistics do not require one.'
   echo 'Paste only the vr-token cookie when prompted (input is hidden). No wallet private key is needed.'
   # /dev/tty keeps this interactive even when the installer arrives through curl | bash.
   (cd "$release" && runuser -u "$account" -- python3 -m variational_grid init-session --config "$conf/$config_name" </dev/tty)
 fi
-# Always validate configuration and the session above. Neither requires a restart
-# when unchanged; refreshed session files are already reloaded by the simulator.
+# Validate configuration and, for modes using it, the session above. Neither
+# requires a restart when unchanged; session files are reloaded by those modes.
 if [[ $mode == compare ]]; then
   (cd "$release" && python3 - "$conf/experiments.json" <<'PY'
 import sys
@@ -475,7 +502,7 @@ else:
 PY
   )
 fi
-if [[ $mode != inventory ]]; then
+if [[ $mode == run || $mode == compare ]]; then
   (cd "$release" && python3 - "$mode" "$conf" <<'PY'
 import sys
 from pathlib import Path
@@ -500,11 +527,14 @@ else:
 PY
   )
 else
-  echo 'Inventory strategy selected; skipping legacy grid migrations.'
+  printf '%s strategy selected; skipping legacy grid migrations.\n' "$mode"
 fi
 settings_key=$({
   printf '%s\n' "$mode"
-  sha256sum "$conf/$config_name"
+  if [[ $mode != qqq-hedge ]]; then
+    # Public QQQ/US100 data uses none of the legacy base economics or credentials.
+    sha256sum "$conf/$config_name"
+  fi
   if [[ $mode != run ]]; then sha256sum "$conf/$experiment_name"; fi
 } | sha256sum | cut -d ' ' -f1)
 engine_key=$({

@@ -23,7 +23,8 @@ class InstallTests(unittest.TestCase):
         self.source = self.root / "repository"
         self.source.mkdir()
         shutil.copytree(self.project / "variational_grid", self.source / "variational_grid", ignore=shutil.ignore_patterns("__pycache__"))
-        for name in ("config.example.json", "experiments.example.json", "inventory.example.json", "install.sh", "pyproject.toml"):
+        for name in ("config.example.json", "experiments.example.json", "inventory.example.json",
+                     "qqq-hedge.example.json", "install.sh", "pyproject.toml"):
             shutil.copy(self.project / name, self.source / name)
         (self.source / "tests").mkdir()
         (self.source / "tests/test_release.py").write_text(
@@ -209,6 +210,145 @@ if name == "runuser":
         self.assertNotIn(['systemctl', 'daemon-reload'], self.calls())
         self.assertFalse(any(c[0] == 'apt-get' or c[0] == 'git' and
                              any(arg in ('fetch', 'clone', 'archive') for arg in c[1:]) for c in self.calls()))
+
+    def test_qqq_fresh_install_preserves_saved_mode_and_reuses_unchanged_deployment(self):
+        result = self.install('--qqq-hedge')
+        self.assertIn('skipping legacy grid migrations', result.stdout)
+        self.assertIn('no login session is required', result.stdout)
+        self.assertFalse(any(c[0] == 'runuser' for c in self.calls()))
+        self.assertEqual((self.conf / 'mode').read_text().strip(), 'qqq-hedge')
+        self.assertIn(f'compare --experiments {self.conf}/qqq-hedge.json', self.unit.read_text())
+        self.assertIn(f'dashboard --experiments {self.conf}/qqq-hedge.json --port 9876', self.web_unit.read_text())
+        self.assertFalse((self.conf / 'experiments.json').exists())
+        self.assertFalse((self.conf / 'inventory.json').exists())
+        path = self.conf / 'qqq-hedge.json'
+        spec = json.loads(path.read_text())
+        self.assertEqual(spec['kind'], 'qqq_hedge')
+        self.assertEqual(len(spec['scenarios']), 9)
+        self.assertEqual({s['grid_step_percent'] for s in spec['scenarios']}, {'0.05', '0.1', '0.2'})
+        self.assertEqual({s['hedge_tolerance_percent'] for s in spec['scenarios']}, {'0', '2', '5'})
+        self.assertEqual(spec['base_config'], str(self.conf / 'config.json'))
+        self.assertEqual(spec['output_dir'], str(self.state / 'qqq-hedge'))
+        output = Path(spec['output_dir'])
+        output.mkdir(exist_ok=True)
+        sentinel = output / 'existing-ledger'
+        sentinel.write_bytes(b'preserved QQQ simulation')
+        original, validated = path.read_bytes(), self.validation_log.read_bytes()
+        self.log.write_text('')
+        self.install()
+        self.assertEqual((self.conf / 'mode').read_text().strip(), 'qqq-hedge')
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(sentinel.read_bytes(), b'preserved QQQ simulation')
+        self.assertEqual(self.validation_log.read_bytes(), validated)
+        self.assertEqual(self.restarts(), [])
+        self.assertNotIn(['systemctl', 'daemon-reload'], self.calls())
+        self.assertFalse(any(c[0] == 'apt-get' or c[0] == 'git' and
+                             any(arg in ('fetch', 'clone', 'archive') for arg in c[1:]) for c in self.calls()))
+
+    def test_qqq_switch_preserves_old_ledgers_and_ignores_legacy_economic_migrations(self):
+        from variational_grid.comparison import Experiment
+        self.install()
+        config_path = self.conf / 'config.json'
+        config = json.loads(config_path.read_text())
+        config.update(center_hours=168, max_levels=8, max_margin_fraction='0.80', paper_leverage='5',
+                      paper_balance_usdc='1700', quantity_barrels='2', fee_bps_per_leg='1')
+        config_path.write_text(json.dumps(config))
+        old_spec = self.conf / 'experiments.json'
+        old_output = Path(json.loads(old_spec.read_text())['output_dir'])
+        old_output.mkdir(exist_ok=True)
+        sentinel = old_output / 'existing-compare-ledger'
+        sentinel.write_bytes(b'preserved comparison')
+        single_ledger = Path(config['state_file'])
+        single_ledger.write_bytes(b'preserved single ledger')
+        preserved = {p: p.read_bytes() for p in (config_path, old_spec, sentinel, single_ledger)}
+        self.install('--qqq-hedge')
+        for path, content in preserved.items():
+            self.assertEqual(path.read_bytes(), content)
+        self.assertFalse(list(self.conf.glob('*.before-*.json')))
+        qqq_path = self.conf / 'qqq-hedge.json'
+        qqq_spec = qqq_path.read_bytes()
+        identity = Experiment.load(qqq_path).identity()
+        qqq_output = Path(json.loads(qqq_spec)['output_dir'])
+        qqq_output.mkdir(exist_ok=True)
+        qqq_ledger = qqq_output / 'existing-qqq-ledger'
+        qqq_ledger.write_bytes(b'preserved QQQ ledger')
+        self.install('--single')
+        self.assertEqual(json.loads(config_path.read_text())['paper_leverage'], '100')
+        self.assertIn(['systemctl', 'disable', '--now', 'variational-grid-web.service'], self.calls())
+        self.install('--qqq-hedge')
+        self.assertEqual(Experiment.load(qqq_path).identity(), identity)
+        self.assertEqual(qqq_path.read_bytes(), qqq_spec)
+        for path in (old_spec, sentinel, single_ledger):
+            self.assertEqual(path.read_bytes(), preserved[path])
+        self.assertEqual(qqq_ledger.read_bytes(), b'preserved QQQ ledger')
+        self.log.write_text('')
+        config = json.loads(config_path.read_text())
+        config['fee_bps_per_leg'] = '3'
+        config['session_file'] = str(self.state / 'unused-session.json')
+        config_path.write_text(json.dumps(config))
+        self.install()
+        self.assertEqual(self.restarts(), [])
+        self.assertEqual(Experiment.load(qqq_path).identity(), identity)
+        self.assertFalse(any(c[0] == 'runuser' for c in self.calls()))
+
+    def test_qqq_examples_revalidate_without_overwriting_config_and_web_only_restarts_web(self):
+        self.install('--qqq-hedge')
+        path = self.conf / 'qqq-hedge.json'
+        spec = json.loads(path.read_text())
+        spec['output_dir'] = str(self.state / 'custom-qqq-run')
+        path.write_text(json.dumps(spec))
+        self.install()
+        preserved = path.read_bytes()
+        with (self.source / 'qqq-hedge.example.json').open('a') as stream:
+            stream.write('\n')
+        self.commit()
+        self.log.write_text('')
+        self.install()
+        self.assertEqual(len(self.validation_log.read_text().splitlines()), 2)
+        self.assertEqual(path.read_bytes(), preserved)
+        self.assertEqual(self.restarts(), [])
+        (self.source / 'variational_grid/web/qqq-ui-fixture.css').write_text('/* new QQQ asset */\n')
+        self.commit()
+        self.log.write_text('')
+        self.install()
+        self.assertEqual(len(self.validation_log.read_text().splitlines()), 3)
+        self.assertEqual(self.restarts(), ['variational-grid-web.service'])
+        self.assertEqual(path.read_bytes(), preserved)
+
+    def test_invalid_preserved_qqq_does_not_switch_existing_services(self):
+        self.install()
+        path = self.conf / 'qqq-hedge.json'
+        path.write_text(json.dumps({'kind': 'unexpected'}))
+        original = path.read_bytes()
+        current = (self.app / 'current').resolve()
+        units = (self.unit.read_bytes(), self.web_unit.read_bytes())
+        self.log.write_text('')
+        result = self.install('--qqq-hedge', expected=1)
+        self.assertIn('requires kind=qqq_hedge', result.stderr)
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual((self.app / 'current').resolve(), current)
+        self.assertEqual((self.conf / 'mode').read_text().strip(), 'compare')
+        self.assertEqual((self.unit.read_bytes(), self.web_unit.read_bytes()), units)
+        self.assertEqual(self.restarts(), [])
+
+    def test_qqq_base_path_and_output_cannot_escape_service_configuration(self):
+        self.install('--qqq-hedge')
+        path = self.conf / 'qqq-hedge.json'
+        spec = json.loads(path.read_text())
+        other_base = self.conf / 'other-base.json'
+        shutil.copyfile(self.conf / 'config.json', other_base)
+        for key, value, message in (
+            ('base_config', str(other_base), 'Service experiments must use'),
+            ('output_dir', str(self.root / 'outside-output'), 'output must stay inside'),
+        ):
+            with self.subTest(field=key):
+                path.write_text(json.dumps({**spec, key: value}))
+                preserved = path.read_bytes()
+                self.log.write_text('')
+                result = self.install(expected=1)
+                self.assertIn(message, result.stderr)
+                self.assertEqual(path.read_bytes(), preserved)
+                self.assertEqual(self.restarts(), [])
 
     def test_inventory_switch_preserves_legacy_configuration_and_all_mode_ledgers(self):
         self.install()

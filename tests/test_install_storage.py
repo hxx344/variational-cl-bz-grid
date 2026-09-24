@@ -141,6 +141,26 @@ class StorageTests(unittest.TestCase):
         self.manager = self.storage_type(self.app, self.conf, self.state)
         self.assertFalse(self.manager.remove(release))
 
+    def test_qqq_output_and_base_config_protect_their_releases(self):
+        output_release = self.release(1, ready=False)
+        base_release = self.release(2, ready=False)
+        output = output_release / 'qqq-data'
+        output.mkdir()
+        sentinel = output / 'ledger.sqlite3'
+        sentinel.write_bytes(b'preserved QQQ ledger')
+        base_path = base_release / 'base.json'
+        base_path.write_text('{}')
+        for relative in (False, True):
+            with self.subTest(relative=relative):
+                configured = os.path.relpath(output, self.conf) if relative else str(output)
+                configured_base = os.path.relpath(base_path, self.conf) if relative else str(base_path)
+                (self.conf / 'qqq-hedge.json').write_text(json.dumps({
+                    'kind': 'qqq_hedge', 'output_dir': configured, 'base_config': configured_base}))
+                self.manager = self.storage_type(self.app, self.conf, self.state)
+                self.assertFalse(self.manager.remove(output_release))
+                self.assertFalse(self.manager.remove(base_release))
+                self.assertEqual(sentinel.read_bytes(), b'preserved QQQ ledger')
+
     def test_reclaims_owned_staging_and_deployment_scratch_only(self):
         for root, name in ((self.app, '.deploy.ABC123'), (self.app / 'releases', '.staging.ABC123')):
             owned = root / name

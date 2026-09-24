@@ -75,6 +75,9 @@ def read_dashboard(experiment, window="24h"):
         if getattr(experiment, "kind", None) == "inventory":
             from .inventory_comparison import read_inventory_dashboard
             return read_inventory_dashboard(experiment, window)
+        if getattr(experiment, "kind", None) == "qqq_hedge":
+            from .qqq_comparison import read_qqq_dashboard
+            return read_qqq_dashboard(experiment, window)
         return _read_dashboard(experiment, window)
 
 
@@ -156,6 +159,10 @@ def make_server(experiment, port=9876):
         routes["/"] = ("inventory.html", "text/html; charset=utf-8")
         routes["/inventory.js"] = ("inventory.js", "text/javascript; charset=utf-8")
         routes["/inventory.css"] = ("inventory.css", "text/css; charset=utf-8")
+    if getattr(experiment, "kind", None) == "qqq_hedge":
+        routes["/"] = ("qqq.html", "text/html; charset=utf-8")
+        routes["/qqq.js"] = ("qqq.js", "text/javascript; charset=utf-8")
+        routes["/qqq.css"] = ("qqq.css", "text/css; charset=utf-8")
     routes["/index.html"] = routes["/"]
     reset_token = secrets.token_urlsafe(32)
 

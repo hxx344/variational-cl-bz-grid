@@ -36,6 +36,9 @@ class Experiment:
         path = Path(path).resolve()
         try:
             data = json.loads(path.read_text(encoding="utf-8-sig"))
+            if isinstance(data, dict) and data.get("kind") == "qqq_hedge":
+                from .qqq_comparison import QQQExperiment
+                return QQQExperiment.load(path)
             if isinstance(data, dict) and data.get("kind") == "inventory":
                 from .inventory_comparison import InventoryExperiment
                 return InventoryExperiment.load(path)
@@ -290,6 +293,9 @@ class Cohort:
 def run_comparison(args):
     from .cli import emit
     experiment = Experiment.load(args.experiments)
+    if getattr(experiment, "kind", None) == "qqq_hedge":
+        from .qqq_comparison import run_qqq
+        return run_qqq(args, experiment)
     if getattr(experiment, "kind", None) == "inventory":
         from .inventory_comparison import run_inventory
         return run_inventory(args, experiment)
@@ -340,7 +346,11 @@ def comparison_status(args):
     with closing(sqlite3.connect(path.as_uri() + "?mode=ro", uri=True)) as db:
         summary = db.execute("SELECT payload FROM summaries ORDER BY ts DESC LIMIT 1").fetchone()
         runtime = db.execute("SELECT payload FROM runtime WHERE id=1").fetchone()
-        summary = json.loads(summary[0]) if summary else None
+        if summary and getattr(experiment, "kind", None) == "qqq_hedge":
+            from .qqq_comparison import decode_summary
+            summary = decode_summary(summary[0])
+        else:
+            summary = json.loads(summary[0]) if summary else None
         emit({"runtime": json.loads(runtime[0]) if runtime else None, "summary": summary,
               "stale": summary is None or time.time() - summary["ts"] > max(60, experiment.base.poll_seconds * 3)})
 

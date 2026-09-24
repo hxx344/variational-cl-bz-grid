@@ -1,0 +1,67 @@
+{
+  "kind": "qqq_hedge",
+  "base_config": "config.example.json",
+  "output_dir": "data/qqq-hedge",
+  "strategy": {
+    "grid_count": 30,
+    "order_notional_usdc": "1000",
+    "poll_seconds": 2,
+    "maker_latency_ms": 200,
+    "cancel_latency_ms": 300,
+    "queue_multiplier": "1",
+    "beta": "1",
+    "hedge_reset_fraction": "0.5",
+    "lighter_fee_bps": "0",
+    "var_fee_bps": "0",
+    "var_slippage_bps": "1",
+    "max_quote_age_seconds": 15,
+    "max_pair_skew_seconds": 10
+  },
+  "scenarios": [
+    {
+      "name": "grid-0.05-hedge-0",
+      "grid_step_percent": "0.05",
+      "hedge_tolerance_percent": "0"
+    },
+    {
+      "name": "grid-0.05-hedge-2",
+      "grid_step_percent": "0.05",
+      "hedge_tolerance_percent": "2"
+    },
+    {
+      "name": "grid-0.05-hedge-5",
+      "grid_step_percent": "0.05",
+      "hedge_tolerance_percent": "5"
+    },
+    {
+      "name": "grid-0.1-hedge-0",
+      "grid_step_percent": "0.1",
+      "hedge_tolerance_percent": "0"
+    },
+    {
+      "name": "grid-0.1-hedge-2",
+      "grid_step_percent": "0.1",
+      "hedge_tolerance_percent": "2"
+    },
+    {
+      "name": "grid-0.1-hedge-5",
+      "grid_step_percent": "0.1",
+      "hedge_tolerance_percent": "5"
+    },
+    {
+      "name": "grid-0.2-hedge-0",
+      "grid_step_percent": "0.2",
+      "hedge_tolerance_percent": "0"
+    },
+    {
+      "name": "grid-0.2-hedge-2",
+      "grid_step_percent": "0.2",
+      "hedge_tolerance_percent": "2"
+    },
+    {
+      "name": "grid-0.2-hedge-5",
+      "grid_step_percent": "0.2",
+      "hedge_tolerance_percent": "5"
+    }
+  ]
+}
