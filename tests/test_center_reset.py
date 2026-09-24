@@ -86,6 +86,23 @@ class CenterResetTests(unittest.TestCase):
         self.assertEqual(Path(configuration(path).state_file), target.resolve())
         self.assertIsNone(upgrade_center(path, comparison=False))
 
+    def test_single_first_upgrade_still_migrates_existing_seven_day_comparison(self):
+        path = self.root / 'base.json'
+        path.write_text(json.dumps(asdict(Config(center_hours=168))))
+        old = Experiment.load(self.path)
+        with Cohort(old) as cohort:
+            cohort.ingest(frame())
+        manifest = (old.output / 'experiment.json').read_bytes()
+        upgrade_center(path, comparison=False)
+        self.assertEqual(Experiment.load(self.path).center_hours, 72)
+        self.assertIsNotNone(upgrade_center(self.path))
+        new = Experiment.load(self.path)
+        self.assertNotEqual(new.output, old.output)
+        self.assertEqual((old.output / 'experiment.json').read_bytes(), manifest)
+        with Cohort(new) as cohort:
+            self.assertIsNone(cohort.latest())
+        self.assertIsNone(upgrade_center(self.path))
+
     def test_reset_archives_every_ledger_and_restores_cash_and_all_counters(self):
         with Cohort(self.experiment) as cohort:
             cohort.ingest(frame())

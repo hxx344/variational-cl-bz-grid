@@ -353,6 +353,31 @@ if name == "runuser":
         self.assertEqual(json.loads(config_path.read_text())['center_hours'], 72)
         self.assertEqual((self.conf / 'config.before-center3d.json').read_bytes(), original_config)
 
+    def test_single_first_upgrade_keeps_old_comparison_window_identity(self):
+        self.install()
+        config_path = self.conf / 'config.json'
+        config = json.loads(config_path.read_text())
+        config.pop('center_hours')
+        config_path.write_text(json.dumps(config))
+        path = self.conf / 'experiments.json'
+        spec = json.loads(path.read_text())
+        spec.pop('center_hours')
+        old_output = self.state / 'comparison-pct-05-1-2-range30'
+        old_output.mkdir()
+        spec['output_dir'] = str(old_output)
+        path.write_text(json.dumps(spec))
+        manifest = old_output / 'experiment.json'
+        manifest.write_text(json.dumps({'scenarios':{r['name']:{} for r in spec['scenarios']}}))
+        previous = manifest.read_bytes()
+        self.install('--single')
+        self.assertEqual(json.loads(config_path.read_text())['center_hours'], 72)
+        self.install('--compare')
+        self.assertEqual(json.loads(path.read_text())['output_dir'], str(old_output)+'-center3d')
+        self.assertEqual(manifest.read_bytes(), previous)
+        self.log.write_text('')
+        self.install('--compare')
+        self.assertEqual(self.restarts(), [])
+
     def test_previous_percentage_install_migrates_to_full_range(self):
         self.install()
         path = self.conf / 'experiments.json'

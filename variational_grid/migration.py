@@ -82,7 +82,15 @@ def upgrade_center(path, *, comparison=True):
     original = path.read_bytes()
     data = json.loads(original.decode("utf-8-sig"))
     current = Experiment.load(path) if comparison else configuration(path)
-    if current.center_hours == 72:
+    legacy_saved_center = False
+    if comparison:
+        manifest = current.output / "experiment.json"
+        if manifest.exists():
+            saved = json.loads(manifest.read_text(encoding="utf-8"))
+            # A --single upgrade may already have changed the shared base config.
+            # The existing comparison's durable identity is the authority for its window.
+            legacy_saved_center = any(c.get("center_hours", 168) != 72 for c in saved["scenarios"].values())
+    if current.center_hours == 72 and not legacy_saved_center:
         return None
     data["center_hours"] = 72
     key = "output_dir" if comparison else "state_file"
