@@ -45,7 +45,8 @@ while ($true) {
     $logPath = [System.IO.Path]::GetTempFileName()
     try {
         $sshArguments = @('-N', '-T', '-E', $logPath,
-            '-o', 'ForkAfterAuthentication=no', '-o', 'ControlPath=none', '-o', 'LogLevel=ERROR',
+            # INFO is required for SSH authentication banners, including QR login.
+            '-o', 'ForkAfterAuthentication=no', '-o', 'ControlPath=none', '-o', 'LogLevel=INFO',
             '-o', 'ExitOnForwardFailure=yes',
             '-o', 'ServerAliveInterval=15', '-o', 'ServerAliveCountMax=6',
             '-o', 'ConnectTimeout=15', '-o', 'ConnectionAttempts=1',

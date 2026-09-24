@@ -64,7 +64,7 @@ sys.exit(step['code'])
                     self.assertEqual(args[args.index("-L") + 1], f"127.0.0.1:{self.port}:127.0.0.1:9876")
                     self.assertEqual(args[args.index("-p") + 1], "2222")
                     self.assertEqual(args[-1], "test-user@server.invalid")
-                    for option in ("ServerAliveInterval=15", "ServerAliveCountMax=6", "ExitOnForwardFailure=yes", "ConnectTimeout=15", "ForkAfterAuthentication=no", "ControlPath=none"):
+                    for option in ("ServerAliveInterval=15", "ServerAliveCountMax=6", "ExitOnForwardFailure=yes", "ConnectTimeout=15", "ForkAfterAuthentication=no", "ControlPath=none", "LogLevel=INFO"):
                         self.assertIn(option, args)
                     self.assertIn("-N", args)
                     self.assertIn("-T", args)
