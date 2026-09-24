@@ -127,3 +127,70 @@ test('paper fill provenance distinguishes old exact quotes from fixed half sprea
   assert.match(label,/缓存参考价估算/);
   assert.match(label,/半点差 0.0015%/);
 });
+
+test('only the published scalper model switches account and position semantics', () => {
+  const legacy = {grid_step_percent:'.05',hedge_threshold_usdc:'3000'};
+  assert.equal(Q.isScalper(legacy),false);
+  assert.equal(Q.scalperStatus(legacy),null);
+  assert.equal(Q.isScalper({scalper:{model:'future_model'}}),false);
+  assert.match(Q.label(legacy),/^网格 0.05%/);
+  const current = {...legacy,scalper:{model:'perp_dex_scalper_v1'}};
+  assert.equal(Q.isScalper(current),true);
+  assert.match(Q.label(current),/^剥头皮 0.05% \/ 对冲 3,000 USDC$/);
+});
+
+test('scalper state keeps fractional seconds, percent and price units without browser countdown', () => {
+  const row = {scalper:{model:'perp_dex_scalper_v1',phase:'cooling_down',cooldown_remaining_seconds:112.5,grid_allowed:false,active_entries:0,active_take_profits:4,occupied_batches:4,max_batches:30,candidate_entry_price:'590.01',candidate_tp_price:'590.305'}};
+  const status = Q.scalperStatus(row);
+  assert.equal(status.phase,'等待开仓冷却');
+  assert.equal(status.waiting,'采样时冷却剩余 112.5 秒');
+  assert.equal(status.gate,'价格距离未满足');
+  assert.equal(status.orders,'开仓 0 / 1 · TP 4 · 占用 4 / 30 批');
+  assert.equal(status.prices,'候选开仓 590.0100 / TP 590.3050 USDC');
+  assert.equal(Q.percent('.05'),'0.05%');
+  assert.equal(Q.seconds(112.5),'112.5 秒');
+  assert.equal(Q.seconds(null),'—');
+  assert.deepEqual(Q.scalperStatus(row),status);
+});
+
+test('zero cooldown does not override blocked, paused or unassessed entry conditions', () => {
+  const row = {scalper:{model:'perp_dex_scalper_v1',phase:'grid_blocked',cooldown_remaining_seconds:0,grid_allowed:false}};
+  assert.equal(Q.scalperStatus(row).phase,'价格距离不足');
+  assert.equal(Q.scalperStatus(row).waiting,'采样时冷却剩余 0 秒');
+  assert.equal(Q.scalperStatus(row).pending,true);
+  row.scalper.phase = 'entry_paused';
+  assert.equal(Q.scalperStatus(row).phase,'行情受限，暂停开仓');
+  row.scalper.grid_allowed = null;
+  assert.equal(Q.scalperStatus(row).gate,'价格距离未评估');
+  row.scalper.grid_allowed = true;
+  assert.equal(Q.scalperStatus(row).gate,'价格距离已满足');
+});
+
+test('each published entry phase explains the latest observation, including absent fields', () => {
+  const phases = {market_gap:'QQQ 行情过期或存在缺口，暂停开仓',awaiting_fill:'开仓单等待成交',cancel_pending:'等待撤单确认',capacity_full:'批次已满，暂停开仓',post_only_wait:'等待可挂 Maker 的价格',opening:'已提交模拟开仓单',take_profit_pending:'等待挂出独立止盈单'};
+  for (const [phase,label] of Object.entries(phases)) assert.equal(Q.scalperStatus({scalper:{model:'perp_dex_scalper_v1',phase}}).phase,label);
+  const unknown = Q.scalperStatus({scalper:{model:'perp_dex_scalper_v1'}});
+  assert.equal(unknown.phase,'等待开仓状态');
+  assert.equal(unknown.waiting,'采样时冷却剩余未提供');
+  assert.equal(unknown.gate,'价格距离未评估');
+  assert.equal(unknown.orders,'开仓 — / 1 · TP — · 占用 — / — 批');
+  assert.equal(unknown.prices,'候选开仓 — / TP — USDC');
+});
+
+test('fill provenance follows each fill model and retains legacy reasons', () => {
+  const entry = {venue:'Lighter',reason:'maker_entry',maker_model:'perp_dex_scalper_v1'};
+  assert.equal(Q.fillReason(entry),'Maker 剥头皮开仓');
+  assert.equal(Q.fillReason({...entry,reason:'maker_take_profit'}),'Maker 批次止盈');
+  assert.equal(Q.fillPricing(entry),'剥头皮 · 严格 Maker 队列模拟');
+  assert.equal(Q.fillReason({reason:'maker_entry'}),'Maker 网格买入');
+  assert.equal(Q.fillReason({reason:'maker_take_profit'}),'Maker 网格止盈');
+  assert.equal(Q.fillReason({...entry,reason:'delta_hedge'}),'敞口对冲调整');
+  assert.equal(Q.fillReason({reason:'unrecognized'}),'unrecognized');
+});
+
+test('a waived cooldown or an active entry never displays a contradictory entry timer', () => {
+  const row = {scalper:{model:'perp_dex_scalper_v1',phase:'opening',cooldown_remaining_seconds:100,cooldown_waived:true,active_entries:1}};
+  assert.equal(Q.scalperStatus(row).waiting,'本轮批次减少，已跳过冷却');
+  row.scalper.cooldown_waived = false;
+  assert.equal(Q.scalperStatus(row).waiting,'开仓单处理中，下次冷却从入场完成起算');
+});

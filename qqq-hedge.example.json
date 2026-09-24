@@ -1,7 +1,13 @@
 {
   "kind": "qqq_hedge",
   "base_config": "config.example.json",
-  "output_dir": "data/qqq-hedge-usd3000-hs0015-v1",
+  "output_dir": "data/qqq-hedge-scalper-v1",
+  "scalper": {
+    "model": "perp_dex_scalper_v1",
+    "wait_seconds": 450,
+    "reprice_after_seconds": 20,
+    "reprice_poll_seconds": 5
+  },
   "pricing": {
     "mode": "shared_indicative_v1",
     "refresh_after_seconds": 3,
@@ -27,16 +33,19 @@
     {
       "name": "grid-0.05-hedge-3000usd",
       "grid_step_percent": "0.05",
+      "take_profit_percent": "0.05",
       "hedge_threshold_usdc": "3000"
     },
     {
       "name": "grid-0.1-hedge-3000usd",
       "grid_step_percent": "0.1",
+      "take_profit_percent": "0.1",
       "hedge_threshold_usdc": "3000"
     },
     {
       "name": "grid-0.2-hedge-3000usd",
       "grid_step_percent": "0.2",
+      "take_profit_percent": "0.2",
       "hedge_threshold_usdc": "3000"
     }
   ]

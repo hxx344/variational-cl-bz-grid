@@ -17,6 +17,7 @@ from .models import D, GridError, dec, utc
 from .qqq_hedge import QQQConfig, QQQEngine, QQQSettings, QQQStore, digest, encoded, hedge_target
 from .qqq_market import RequestDeferred
 from .qqq_pricing import QQQPricing, ReferenceCache, source_valid, reference_price
+from .qqq_scalper import ScalperSettings
 
 
 def summary_record(summary):
@@ -53,6 +54,7 @@ class QQQExperiment:
     settings: QQQSettings
     pricing: QQQPricing = field(default_factory=QQQPricing)
     previous_output: Path | None = None
+    scalper: ScalperSettings | None = None
     kind = "qqq_hedge"
 
     @classmethod
@@ -62,12 +64,13 @@ class QQQExperiment:
         try:
             data = json.loads(path.read_text(encoding="utf-8-sig"))
             required = {"kind", "base_config", "output_dir", "strategy", "scenarios"}
-            if not required <= set(data) <= required | {"pricing", "previous_output_dir"} or data["kind"] != cls.kind:
+            if not required <= set(data) <= required | {"pricing", "previous_output_dir", "scalper"} or data["kind"] != cls.kind:
                 raise ValueError()
             base_path = (path.parent / data["base_config"]).resolve()
             old = configuration(base_path)
             settings = QQQSettings(**data["strategy"]).validate()
             pricing = QQQPricing.load(data.get("pricing", {}))
+            scalper = ScalperSettings(**data["scalper"]).validate() if "scalper" in data else None
             base = SimpleNamespace(session_file=old.session_file, poll_seconds=settings.poll_seconds)
             output = (path.parent / data["output_dir"]).resolve()
             if any(p.is_relative_to(output) for p in (path, base_path, Path(old.session_file), Path(old.state_file))):
@@ -77,7 +80,8 @@ class QQQExperiment:
             scenarios, combinations = {}, set()
             for item in data["scenarios"]:
                 dollars = "hedge_threshold_usdc" in item
-                if set(item) != {"name", "grid_step_percent", "hedge_threshold_usdc" if dollars else "hedge_tolerance_percent"}:
+                keys = {"name", "grid_step_percent", "hedge_threshold_usdc" if dollars else "hedge_tolerance_percent"}
+                if not keys <= set(item) <= keys | ({"take_profit_percent"} if scalper else set()):
                     raise ValueError()
                 name = item["name"]
                 if not isinstance(name, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,39}", name) or name.lower() in {n.lower() for n in scenarios}:
@@ -86,13 +90,16 @@ class QQQExperiment:
                 if not 0 < step * settings.grid_count < 100 or not (tolerance > 0 if dollars else 0 <= tolerance < 100) or (step, dollars, tolerance) in combinations:
                     raise ValueError()
                 combinations.add((step, dollars, tolerance))
-                scenarios[name] = QQQConfig(settings, name, str(step), None if dollars else str(tolerance), str(output / "ledgers" / (name + ".sqlite3")), str(tolerance) if dollars else None, pricing.half_spread_percent)
+                profit = dec(item.get("take_profit_percent", step)) if scalper else None
+                if profit is not None and not 0 < profit < 100:
+                    raise ValueError()
+                scenarios[name] = QQQConfig(settings, name, str(step), None if dollars else str(tolerance), str(output / "ledgers" / (name + ".sqlite3")), str(tolerance) if dollars else None, pricing.half_spread_percent, scalper, str(profit) if profit is not None else None)
             if len({c.hedge_threshold_usdc is not None for c in scenarios.values()}) != 1:
                 raise GridError("QQQ scenarios must use the same hedge threshold unit")
             previous_output = (path.parent / data["previous_output_dir"]).resolve() if data.get("previous_output_dir") else None
             if previous_output == output:
                 raise GridError("Previous QQQ output must be different from the new output")
-            return cls(base, output, scenarios, settings, pricing, previous_output)
+            return cls(base, output, scenarios, settings, pricing, previous_output, scalper)
         except (OSError, ValueError, TypeError, KeyError, AttributeError):
             raise GridError("Invalid QQQ hedge experiment; require separate output and unique spacing/tolerance scenarios") from None
 
@@ -250,6 +257,8 @@ class QQQCohort(Cohort):
             previous_start = previous.get("pricing_since_utc") if previous and previous.get("pricing") == frame.market["pricing_policy"] else None
             summary.update(pricing=frame.market["pricing_policy"], pricing_since_utc=previous_start or utc(frame.ts))
             summary["market"]["quote_cache"] = frame.market["quote_cache"]
+        if self.experiment.scalper is not None:
+            summary["scalper"] = asdict(self.experiment.scalper)
         with self.db:
             self.db.execute("INSERT INTO summaries VALUES (?,?)", (frame.ts, summary_record(summary)))
         self.set_runtime("running" if frame.market["allow_entries"] else "degraded", frame.market.get("reason") or None)

@@ -1,4 +1,4 @@
-"""Deterministic long-only maker ladder and dollar-delta hedge, PAPER ONLY."""
+"""Deterministic long-only maker strategies and dollar-delta hedge, PAPER ONLY."""
 from dataclasses import asdict, dataclass
 from decimal import ROUND_CEILING, ROUND_FLOOR
 import hashlib
@@ -8,6 +8,7 @@ import sqlite3
 
 from .models import D, GridError, dec
 from .store import Store
+from .qqq_scalper import ScalperSettings, SOURCE_COMMIT
 
 
 def encoded(value):
@@ -67,6 +68,8 @@ class QQQConfig:
     state_file: str
     hedge_threshold_usdc: str | None = None
     half_spread_percent: str | None = None
+    scalper: ScalperSettings | None = None
+    take_profit_percent: str | None = None
 
     def strategy_identity(self):
         identity = {"model_version": 1, "settings": asdict(self.settings), "name": self.name,
@@ -77,6 +80,9 @@ class QQQConfig:
             identity["hedge_threshold_usdc"] = self.hedge_threshold_usdc
         if self.half_spread_percent is not None:
             identity["half_spread_percent"] = self.half_spread_percent
+        if self.scalper is not None:
+            identity.update(model_version=2, scalper=asdict(self.scalper),
+                            take_profit_percent=self.take_profit_percent or self.grid_step_percent, reference_commit=SOURCE_COMMIT)
         return encoded(identity)
 
 
@@ -203,6 +209,9 @@ def _order(account, slot, side, qty, price, market, now, settings):
 
 def maker_step(before, market, now, config, allow_entries):
     """Consume each observed trade at most once per account, including partial fills."""
+    if config.scalper is not None:
+        from .qqq_scalper import scalper_step
+        return scalper_step(before, market, now, config, allow_entries)
     account = json.loads(encoded(before))
     settings, fills = config.settings, []
     slots = {x["slot"]: x for x in account["slots"]}
@@ -376,6 +385,8 @@ class QQQEngine:
                     "var_valued_at": account["last_var_ts"], "anchor": account["anchor"]}
         if self.config.hedge_threshold_usdc is not None:
             snapshot["hedge_threshold_usdc"] = self.config.hedge_threshold_usdc
+        if self.config.scalper is not None:
+            snapshot["scalper"] = account["scalper"]["status"]
         if "pricing_policy" in frame.market:
             snapshot["pricing_stats"] = {key: account.get(key, 0) for key in ("reference_price_fills", "cached_price_fills", "max_reference_age_seconds")}
         return account, fills, snapshot

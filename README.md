@@ -1,6 +1,6 @@
 # 跨品种网格与对冲模拟
 
-提供 CL/BZ 价差网格、CL/BZ 库存组合，以及 **Lighter QQQ 只做多挂单剥头皮 + Variational US100 对冲**三种独立纸面策略。QQQ 模式对照三种格距，共三组，统一净敞口阈值 3000 USDC，单组 30 格、每格 1000 USDC；部署和统计口径见文末。
+提供 CL/BZ 价差网格、CL/BZ 库存组合，以及 **Lighter QQQ 只做多挂单剥头皮 + Variational US100 对冲**三种独立纸面策略。QQQ 模式对照三种间距，共三组，统一净敞口阈值 3000 USDC，单组最多 30 个批次、每批 1000 USDC；部署和统计口径见文末。
 
 CL/BZ 模式从 Variational Omni 的前端接口读取真实行情，在本地模拟 CL、BZ 等桶数双腿市价成交。以 **BZ − CL 的最近 3 日平均价差**为中枢。无需钱包私钥；该模式使用已经登录的 `vr-token` Cookie 请求与每腿桶数相匹配的指示性买卖报价。
 
@@ -309,9 +309,24 @@ python -m variational_grid inventory-demo --output output/inventory-divergence -
 
 ## Lighter QQQ 剥头皮与 US100 对冲：三组
 
-三个独立模拟账户分别使用 **0.05% / 0.1% / 0.2%** 格距；QQQ 只做多，30 格、每格计划 1,000 USDC。US100 用于按需对冲，每组统一 **3,000 USDC 净敞口阈值**。参数见 `qqq-hedge.example.json`，各组独立保存两腿损益、持仓、成交数量和成交额。
+三个独立模拟账户分别使用 **0.05% / 0.1% / 0.2%** 开仓间距，止盈比例沿用各组间距；QQQ 只做多，最多 30 个占用批次，每批计划 1,000 USDC。US100 用于按需对冲，每组统一 **3,000 USDC 净敞口阈值**。参数见 `qqq-hedge.example.json`，各组独立保存两腿损益、持仓、成交数量和成交额。
 
-QQQ 网格以首次有效盘口中价为锚点向下布置，每笔入场挂一格止盈；部分入场成交可对应部分止盈，止盈后重新挂回该层。整体空仓且价格向上离开锚点一格时，撤单并等待模拟撤单延迟后重设锚点。成交由公开逐笔与可见排队量驱动，仅触价不会直接成交。重连或逐笔缺口不补造历史成交。三组最多各持有30格库存，满格计划入场金额约30,000 USDC，US100对冲金额另计。
+新模型 `perp_dex_scalper_v1` 依据 [perp-dex-tools 的 TradingBot](https://github.com/your-quantguy/perp-dex-tools/blob/4679a339b8cdc9998707feeda3c5d8b84fb8681f/trading_bot.py) 和 [Lighter 适配器](https://github.com/your-quantguy/perp-dex-tools/blob/4679a339b8cdc9998707feeda3c5d8b84fb8681f/exchanges/lighter.py) 的开仓、等待及止盈规则独立实现：一次只挂一张近盘口开仓单，成交后逐批挂独立止盈。30 指最多占用批次，并非同时预挂 30 张买单。下一笔开仓价根据当时盘口计算，批次编号单调递增。
+
+基础等待 `scalper.wait_seconds=450`，从上一笔开仓完成（或部分成交撤单确认）开始计时。未平仓批次数为 0–4 / 5–9 / 10–19 / 20–29 时，等待分别为 **112.5 / 225 / 450 / 900 秒**；等待时间需严格超过该值。若未平仓批次数比上一次开仓决策减少，本轮跳过冷却，但仍检查价格间距；价格条件失败也会消耗本轮豁免。达到 30 个占用批次暂停加仓。
+
+做多时的价格条件与原机器人一致，`step` 和 `tp` 均是配置百分比除以 100：
+
+```text
+无未平仓批次：价格条件通过
+有未平仓批次：min(已有止盈价) / [当前 ask × (1 + tp)] > 1 + step
+候选开仓价：min(盘口中价, 所有已有止盈价 − 一个 tick)
+每批止盈价：实际开仓限价 × (1 + tp)，向下取整到 tick
+```
+
+候选开仓价按 tick 四舍五入，再限制到 `ask − tick`，保持 Maker。未成交开仓单在提交 20 秒后首次检查，随后每 5 秒检查：候选价格上涨则撤单，撤单生效后重新判断入场；持平或下降则继续等待。部分成交先保留剩余开仓单，完全成交或撤单确认后，仅为实际成交数量挂止盈。行情恢复时重建止盈，不补造缺口期间的成交；止盈暂时无法挂出时暂停继续加仓。
+
+原适配器实际使用 GTT 限价单；本程序沿用**严格 Maker 的公开逐笔、可见排队量、提交及撤单延迟模拟**，不复制原 SDK 的真实下单行为。仅触价不直接成交，同一批采样不能成交刚生成的止盈单。三组最多各占用 30 批库存，满批计划入场金额约 30,000 USDC，市值随价格变化，US100 对冲金额另计。旧配置未指定 `scalper` 时继续按旧固定锚点模型读取和运行。
 
 对冲按美元净名义金额计算，数量带方向：
 
@@ -351,7 +366,7 @@ HTTP冷却独立于缓存可用性。每次Var请求占用3秒预算，429后6�
 curl -fsSL https://raw.githubusercontent.com/hxx344/variational-cl-bz-grid/main/install.sh | sudo bash -s -- --qqq-hedge
 ```
 
-配置在 `/etc/variational-grid/qqq-hedge.json`，新默认数据目录 `/var/lib/variational-grid/qqq-hedge-usd3000-hs0015-v1/`。识别到完整历史默认九组时，安装器备份原配置为 `qqq-hedge.before-usd3000-hs0015-v1.json`，切换到三组独立新目录，旧配置、账本和CL/BZ数据均保留。自定义组合或经济参数不会被自动覆盖。重复执行采用增量更新，未变化时复用代码和验证结果，不重复重启。
+配置在 `/etc/variational-grid/qqq-hedge.json`，首次安装默认数据目录 `/var/lib/variational-grid/qqq-hedge-scalper-v1/`。识别到历史默认九组或三组固定锚点配置时，安装器备份原配置为 `qqq-hedge.before-scalper-v1.json`，将原目录名加上 `-scalper-v1` 后开始新的三组模拟，旧配置、账本和 CL/BZ 数据均保留，新目录继承原报价缓存和限流冷却。自定义组合或经济参数不会被自动覆盖。重复执行采用增量更新，未变化时复用代码和验证结果，不重复重启；服务器仅执行快速离线部署检查，完整测试在 CI 执行。
 
 网页沿用服务 `variational-grid-web.service`，监听服务器 `127.0.0.1:9876`。在自己电脑保持SSH转发：
 
@@ -359,7 +374,7 @@ curl -fsSL https://raw.githubusercontent.com/hxx344/variational-cl-bz-grid/main/
 ssh -N -o ExitOnForwardFailure=yes -L 18765:127.0.0.1:9876 USER@SERVER_IP
 ```
 
-浏览器打开 [监控页](http://127.0.0.1:18765/)。各账户图表、两腿损益与成交量分别显示；新三组的敞口图单位为USDC，阈值线为±3000，旧百分比实验保持原单位。
+浏览器打开 [监控页](http://127.0.0.1:18765/)。各账户图表、两腿损益与成交量分别显示；新三组的敞口图单位为USDC，阈值线为±3000，旧百分比实验保持原单位。剥头皮卡片显示采样时的开仓阶段、冷却剩余、价格条件、开仓单和独立止盈单数量、占用批次及候选价格；服务停止时等待值保持最后采样值。
 
 ```bash
 python -m variational_grid compare --experiments qqq-hedge.example.json
@@ -368,4 +383,4 @@ python -m variational_grid compare-status --experiments qqq-hedge.example.json
 python -m variational_grid compare-reset --experiments qqq-hedge.example.json --confirm
 ```
 
-服务器命令将实验路径换成 `/etc/variational-grid/qqq-hedge.json`。重置先归档当前全部账户账本，不产生模拟平仓。修改格距、金额阈值、费用或半点差须使用新的 `output_dir`；刷新周期与缓存上限可调整，逐帧记录实际采用的口径。需复查旧九组时，可在另一个端口以备份配置启动dashboard。
+服务器命令将实验路径换成 `/etc/variational-grid/qqq-hedge.json`。重置先归档当前全部账户账本，不产生模拟平仓。修改间距、止盈、开仓等待、金额阈值、费用或半点差须使用新的 `output_dir`；刷新周期与缓存上限可调整，逐帧记录实际采用的口径。需复查旧模拟时，可在另一个端口以备份配置启动 dashboard。

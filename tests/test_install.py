@@ -230,7 +230,9 @@ if name == "runuser":
         self.assertEqual(spec['strategy']['var_slippage_bps'], '0')
         self.assertEqual(spec['pricing']['half_spread_percent'], '0.0015')
         self.assertEqual(spec['base_config'], str(self.conf / 'config.json'))
-        self.assertEqual(spec['output_dir'], str(self.state / 'qqq-hedge-usd3000-hs0015-v1'))
+        self.assertEqual(spec['output_dir'], str(self.state / 'qqq-hedge-scalper-v1'))
+        self.assertEqual(spec['scalper']['wait_seconds'], 450)
+        self.assertTrue(all(s['take_profit_percent'] == s['grid_step_percent'] for s in spec['scenarios']))
         output = Path(spec['output_dir'])
         output.mkdir(exist_ok=True)
         sentinel = output / 'existing-ledger'
@@ -263,12 +265,34 @@ if name == "runuser":
         self.assertEqual(len(new['scenarios']), 3)
         self.assertEqual(new['previous_output_dir'], str(old_output))
         self.assertEqual(sentinel.read_bytes(), b'old nine-account history')
-        self.assertEqual(path.with_name('qqq-hedge.before-usd3000-hs0015-v1.json').read_bytes(), old_bytes)
+        self.assertEqual(path.with_name('qqq-hedge.before-scalper-v1.json').read_bytes(), old_bytes)
         self.assertEqual(self.restarts(), ['variational-grid.service', 'variational-grid-web.service'])
         original = path.read_bytes()
         self.log.write_text('')
         self.install()
         self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(self.restarts(), [])
+
+    def test_qqq_current_three_upgrade_preserves_ledgers_and_then_skips_unchanged(self):
+        from test_qqq_migration import three_spec
+        self.install('--qqq-hedge')
+        path = self.conf / 'qqq-hedge.json'
+        old_output = self.state / 'qqq-hedge-usd3000-hs0015-v1'
+        old_output.mkdir()
+        sentinel = old_output / 'old-ledger'
+        sentinel.write_bytes(b'old three-account history')
+        path.write_text(json.dumps(three_spec(str(self.conf / 'config.json'), str(old_output))))
+        original = path.read_bytes()
+        self.log.write_text('')
+        self.install()
+        new = json.loads(path.read_text())
+        self.assertEqual(new['previous_output_dir'], str(old_output))
+        self.assertEqual(new['scalper']['model'], 'perp_dex_scalper_v1')
+        self.assertEqual(path.with_name('qqq-hedge.before-scalper-v1.json').read_bytes(), original)
+        self.assertEqual(sentinel.read_bytes(), b'old three-account history')
+        self.assertEqual(self.restarts(), ['variational-grid.service', 'variational-grid-web.service'])
+        self.log.write_text('')
+        self.install()
         self.assertEqual(self.restarts(), [])
 
     def test_qqq_switch_preserves_old_ledgers_and_ignores_legacy_economic_migrations(self):
