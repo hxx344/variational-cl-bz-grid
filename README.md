@@ -90,10 +90,10 @@ python -m variational_grid dashboard --port 9876
 
 网页进程读取本地已发布的共同采样和各组账本，并支持提交模拟重置请求，不读取登录令牌、不请求交易所、不提供下单或修改配置入口。仓位按共同采样时间截断，浮盈亏按该时刻的数量对应报价和成本估值。模拟报价仍由原进程获取，网页不需要另输入令牌。
 
-本次实验的静态简表保存为 `data/comparison-pct-05-1-2-range30/public/index.html`，也可以从页面的“数据与模拟口径”打开。仅查看静态简表可执行：
+本次实验的静态简表保存为 `data/comparison-pct-05-1-2-range30-center3d-unlimited-margin/public/index.html`，也可以从页面的“数据与模拟口径”打开。仅查看静态简表可执行：
 
 ```powershell
-python -m http.server 0 --bind 127.0.0.1 --directory data/comparison-pct-05-1-2-range30/public
+python -m http.server 0 --bind 127.0.0.1 --directory data/comparison-pct-05-1-2-range30-center3d-unlimited-margin/public
 ```
 
 端口 `0` 会自动选择空闲端口，访问终端显示的地址即可。`public/summary.json` 提供相同结果，均不包含令牌。静态简表只展示最近 360 次采样；新监控页支持上述更长时间范围。两种页面都使用自带 SVG、无外部资源，没有根据短期结果自动挑选“最佳参数”。
@@ -130,7 +130,7 @@ python -m http.server 0 --bind 127.0.0.1 --directory data/comparison-pct-05-1-2-
 | `grid_step_percent` | 1 | 三日平均价差中枢绝对值的百分比；三组对照分别覆盖为 0.5、1、2 |
 | `max_levels` | 30 | 单组默认每侧层数及最多持仓组数；三组分别覆盖为 60、30、15，以匹配每侧 30% |
 | `paper_leverage` | 5 | 模拟保证金估算杠杆 |
-| `max_margin_fraction` | 0.80 | 新开仓后估算保证金不得超过“权益与初始资金较小值”的该比例 |
+| `max_margin_fraction` | null | 默认取消持仓金额与保证金预算限制；设为 0～1 之间的数值可启用旧版额度规则 |
 | `max_drawdown_fraction` | 0.20 | 相对历史权益峰值的最大回撤；达到后模拟平仓并锁定停机 |
 | `max_holding_hours` | 168 | 单组最长持仓时间；超过后按下一份有效报价退出 |
 | `slippage_bps_per_leg` | 1 | 每腿每次成交滑点；1 bp = 0.01% |
@@ -188,7 +188,7 @@ curl -fsSL https://raw.githubusercontent.com/hxx344/variational-cl-bz-grid/main/
 sudo bash install.sh --compare
 ```
 
-首次安装不带参数也默认运行三组；已有安装不带参数会保留所选模式，`--compare` 明确切换为三组。实验配置放在 `/etc/variational-grid/experiments.json`，新实验结果放在 `/var/lib/variational-grid/comparison-pct-05-1-2-range30/`。升级检测到原来的 `step-0.15 / step-0.20 / step-0.25` 绝对间距配置时，自动备份为 `experiments.absolute-015-020-025.json`，直接升级为每侧 30% 的百分比配置并使用独立新账本；上一版 `step-0.5pct / step-1pct / step-2pct` 也会迁移到 60/30/15 层，原配置备份为 `experiments.before-range30.json`。旧目录和账本原样保留，资金、数量、成本及保证金/回撤限制保留。自定义实验不会自动改写；用 `--single` 切回原单组模式，各自账本保留，同时停用三组网页服务。
+首次安装不带参数也默认运行三组；已有安装不带参数会保留所选模式，`--compare` 明确切换为三组。实验配置放在 `/etc/variational-grid/experiments.json`，新实验结果放在 `/var/lib/variational-grid/comparison-pct-05-1-2-range30-center3d-unlimited-margin/`。升级检测到原来的 `step-0.15 / step-0.20 / step-0.25` 绝对间距配置时，自动备份为 `experiments.absolute-015-020-025.json`，直接升级为每侧 30% 的百分比配置并使用独立新账本；上一版 `step-0.5pct / step-1pct / step-2pct` 也会迁移到 60/30/15 层，原配置备份为 `experiments.before-range30.json`。旧目录和账本原样保留，资金、数量、成本与回撤规则保留；本版另行迁移为三日中枢、金额不限（见下文）。网格范围迁移仅识别上述旧默认组，已迁移后的自定义层数和金额限制不会被重复安装覆盖；用 `--single` 切回原单组模式，各自账本保留，同时停用三组网页服务。
 
 比较模式自动安装并启动 `variational-grid-web.service`，只监听服务器 `127.0.0.1:9876`。在**自己的电脑**打开 PowerShell 或终端，替换服务器登录名和 IP 后执行：
 
@@ -196,7 +196,7 @@ sudo bash install.sh --compare
 ssh -N -o ExitOnForwardFailure=yes -L 18765:127.0.0.1:9876 root@你的服务器IP
 ```
 
-保持此终端打开，浏览器访问 [服务器监控页（SSH 转发）](http://127.0.0.1:18765/)。不需要域名，也不需要开放 9876 公网端口。升级已有服务器仍然只需重复上方一键命令，旧账本会直接出现在页面中。网页本身不要求粘贴令牌。
+保持此终端打开，浏览器访问 [服务器监控页（SSH 转发）](http://127.0.0.1:18765/)。不需要域名，也不需要开放 9876 公网端口。升级已有服务器仍然只需重复上方一键命令，页面显示当前配置所指向的实验；发生策略迁移时显示新实验，旧账本仍在原目录。网页本身不要求粘贴令牌。
 
 - 参数：`/etc/variational-grid/config.json`
 - 会话、账本：`/var/lib/variational-grid/`；可改文件名，但服务配置要求路径保持在该目录内。
@@ -228,4 +228,8 @@ ssh -N -o ExitOnForwardFailure=yes -L 18765:127.0.0.1:9876 root@你的服务器I
 python3 -m variational_grid compare-reset --experiments /etc/variational-grid/experiments.json --confirm
 ```
 
-当前没有单独的固定持仓金额字段；开仓时以 `min(预计开仓后权益, 初始资金) × max_margin_fraction × paper_leverage` 限制 **CL + BZ 双腿名义金额合计**。默认每组 1,000 USDC、80% 保证金、5 倍杠杆，最多约 4,000 USDC 双腿名义金额（保证金 800 USDC）。预估权益扣除新开仓的价差、滑点和开平手续费；亏损时额度收紧，盈利不会扩大初始额度。页面显示的是当前权益下的额度，实际开仓还需扣新交易成本。60/30/15 层与 20% 回撤保护继续有效，各组模拟资金独立。已有仓随市场价格变化可超过开仓额度，不会仅因超额强制减仓；累计成交额不等于当前持仓金额。
+默认 **取消持仓金额和保证金预算限制**，配置为 `max_margin_fraction: null`。三组仍以三日中枢的 **0.5% / 1% / 2%** 为格距，范围 **上下各 30%**，每格一组，分别最多持有 **60 / 30 / 15 组**；不会在范围之外增加格位，也不会在同一格叠仓。初始资金仍用于权益与损益计算，20% 回撤退出、最长持仓及只减仓规则继续生效。页面显示“金额不限”，同时显示实际 CL + BZ 双腿持仓金额、保证金估算和累计成交量。保证金估算不再阻止开仓；累计成交额与当前持仓金额分别统计。
+
+一键升级会备份 `experiments.before-unlimited-margin.json`，在每组覆盖参数中设置 `max_margin_fraction: null`，并切换至带 `-unlimited-margin` 后缀的新目录；不修改比较模式共享的基础配置。单组模式对应备份 `config.before-unlimited-margin.json`，使用新的 `*-unlimited-margin.sqlite3`。旧数据完整保留，新一轮从零统计，重复升级不会反复新建账本，也不会覆盖迁移后自行设置的额度。
+
+旧配置省略 `max_margin_fraction` 时仍按 0.80 解释，以便读取历史账本。显式设置数值时，旧额度规则为 `min(预计开仓后权益, 初始资金) × max_margin_fraction × paper_leverage`；默认旧参数对应双腿约 4,000 USDC。手动更改该字段时仍须改用新账本，不能直接改变旧持仓的计算规则。

@@ -6,7 +6,7 @@
   "grid_step_percent": "1",
   "max_levels": 30,
   "paper_leverage": "5",
-  "max_margin_fraction": "0.80",
+  "max_margin_fraction": null,
   "max_drawdown_fraction": "0.20",
   "max_holding_hours": 168,
   "slippage_bps_per_leg": "1",

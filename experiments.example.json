@@ -1,10 +1,10 @@
 {
   "base_config": "config.local.json",
   "center_hours": 72,
-  "output_dir": "data/comparison-pct-05-1-2-range30-center3d",
+  "output_dir": "data/comparison-pct-05-1-2-range30-center3d-unlimited-margin",
   "scenarios": [
-    {"name": "step-0.5pct", "overrides": {"grid_step_percent": "0.5", "max_levels": 60}},
-    {"name": "step-1pct", "overrides": {"grid_step_percent": "1", "max_levels": 30}},
-    {"name": "step-2pct", "overrides": {"grid_step_percent": "2", "max_levels": 15}}
+    {"name": "step-0.5pct", "overrides": {"grid_step_percent": "0.5", "max_levels": 60, "max_margin_fraction": null}},
+    {"name": "step-1pct", "overrides": {"grid_step_percent": "1", "max_levels": 30, "max_margin_fraction": null}},
+    {"name": "step-2pct", "overrides": {"grid_step_percent": "2", "max_levels": 15, "max_margin_fraction": null}}
   ]
 }

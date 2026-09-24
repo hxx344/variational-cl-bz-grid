@@ -21,6 +21,15 @@ test('range labels distinguish one direction from the full span', () => {
   assert.equal(M.rangeLabel({grid_range_percent:'30.0',grid_span_percent:'60.0'}), '上下各 30% · 总跨度 60%');
   assert.equal(M.rangeLabel({max_levels:8}), '每侧 8 层');
 });
+
+test('unlimited funding is explicit and distinct from zero or missing limits', () => {
+  assert.equal(M.limitLabel({margin_limit_enabled:false,entry_notional_limit_usdc:null}), '金额不限');
+  assert.equal(M.limitLabel({margin_limit_enabled:false,margin_limit_usdc:null}, 'margin_limit_usdc'), '金额不限');
+  assert.equal(M.limitLabel({margin_limit_enabled:true,entry_notional_limit_usdc:'0'}), '0.00 USDC');
+  assert.equal(M.limitLabel({entry_notional_limit_usdc:'4000'}), '4,000.00 USDC');
+  assert.equal(M.limitLabel({entry_notional_limit_usdc:null}), '—');
+  assert.equal(M.limitLabel({}), '—');
+});
 test('time is Beijing time, independent of the viewer timezone', () => {
   assert.match(M.date(1735689600), /01.01.*08:00:00/);
   assert.match(M.date(1735689600, false, true), /2025/);

@@ -112,7 +112,7 @@ class Engine:
                     round_trip_drag = sum((self.qty * (self.price(q, "buy") - self.price(q, "sell")) for q in (cl, bz)), D(0))
                     exit_fees = sum((p * self.qty * self.fee for _, _, p in self.execution(direction, cl, bz, False)), D(0))
                     post_equity = equity - entry_fee - exit_fees - round_trip_drag
-                    if post_equity <= 0 or margin + margin_one > min(post_equity, dec(self.config.paper_balance_usdc)) * dec(self.config.max_margin_fraction):
+                    if self.config.max_margin_fraction is not None and (post_equity <= 0 or margin + margin_one > min(post_equity, dec(self.config.paper_balance_usdc)) * dec(self.config.max_margin_fraction)):
                         skip_reason = "margin_budget"
                     elif (peak - post_equity) / peak >= dec(self.config.max_drawdown_fraction):
                         skip_reason = "entry_drawdown"
@@ -146,7 +146,10 @@ class Engine:
             return snapshot
 
     def position_limits(self, equity, margin):
-        limit = max(D(0), min(dec(equity), dec(self.config.paper_balance_usdc))) * dec(self.config.max_margin_fraction)
+        enabled = self.config.max_margin_fraction is not None
+        limit = max(D(0), min(dec(equity), dec(self.config.paper_balance_usdc))) * dec(self.config.max_margin_fraction) if enabled else None
         leverage = dec(self.config.paper_leverage)
         return {"position_notional_usdc": str(dec(margin) * leverage),
-                "margin_limit_usdc": str(limit), "entry_notional_limit_usdc": str(limit * leverage)}
+                "margin_limit_enabled": enabled,
+                "margin_limit_usdc": str(limit) if enabled else None,
+                "entry_notional_limit_usdc": str(limit * leverage) if enabled else None}

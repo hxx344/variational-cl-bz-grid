@@ -251,9 +251,12 @@ if name == "runuser":
         self.assertEqual([s["overrides"]["grid_step_percent"] for s in experiments["scenarios"]], ["0.5", "1", "2"])
         self.assertEqual([s["overrides"]["max_levels"] for s in experiments["scenarios"]], [60, 30, 15])
         config = json.loads((self.conf / "config.json").read_text())
+        self.assertIsNone(config['max_margin_fraction'])
+        self.assertTrue(all(s['overrides']['max_margin_fraction'] is None for s in experiments['scenarios']))
         config["paper_balance_usdc"] = "1500"
         (self.conf / "config.json").write_text(json.dumps(config))
         experiments["scenarios"][0]["overrides"]["max_levels"] = 6
+        experiments["scenarios"][0]["overrides"]["max_margin_fraction"] = '0.5'
         (self.conf / "experiments.json").write_text(json.dumps(experiments))
         preserved = {self.conf / "config.json": (self.conf / "config.json").read_bytes(),
                      self.conf / "experiments.json": (self.conf / "experiments.json").read_bytes(),
@@ -377,6 +380,50 @@ if name == "runuser":
         self.log.write_text('')
         self.install('--compare')
         self.assertEqual(self.restarts(), [])
+
+    def check_margin_upgrade_order(self, first, second):
+        self.install()
+        config_path = self.conf / 'config.json'
+        config = json.loads(config_path.read_text())
+        old_state = self.state / 'paper.sqlite3'
+        old_state.write_bytes(b'old single ledger')
+        config.update(max_margin_fraction='0.80', state_file=str(old_state))
+        config_path.write_text(json.dumps(config))
+        original_config = config_path.read_bytes()
+        path = self.conf / 'experiments.json'
+        spec = json.loads(path.read_text())
+        old_output = self.state / 'comparison-pct-05-1-2-range30-center3d'
+        old_output.mkdir()
+        spec['output_dir'] = str(old_output)
+        for row in spec['scenarios']:
+            row['overrides'].pop('max_margin_fraction')
+        manifest = old_output / 'experiment.json'
+        manifest.write_text(json.dumps({'scenarios': {r['name']: {'center_hours': 72, 'max_margin_fraction': '0.80'}
+                                                     for r in spec['scenarios']}}))
+        original_manifest = manifest.read_bytes()
+        path.write_text(json.dumps(spec))
+        original_spec = path.read_bytes()
+        for mode in (first, second):
+            result = self.install(mode)
+            self.assertIn('Removed paper position/margin budget', result.stdout)
+        updated = json.loads(path.read_text())
+        self.assertEqual(updated['output_dir'], str(old_output) + '-unlimited-margin')
+        self.assertTrue(all(r['overrides']['max_margin_fraction'] is None for r in updated['scenarios']))
+        self.assertEqual([r['overrides']['max_levels'] for r in updated['scenarios']], [60, 30, 15])
+        self.assertEqual((self.conf / 'experiments.before-unlimited-margin.json').read_bytes(), original_spec)
+        self.assertEqual((self.conf / 'config.before-unlimited-margin.json').read_bytes(), original_config)
+        self.assertIsNone(json.loads(config_path.read_text())['max_margin_fraction'])
+        self.assertEqual(old_state.read_bytes(), b'old single ledger')
+        self.assertEqual(manifest.read_bytes(), original_manifest)
+        self.log.write_text('')
+        self.install(second)
+        self.assertEqual(self.restarts(), [])
+
+    def test_margin_upgrade_single_then_compare_preserves_saved_identity(self):
+        self.check_margin_upgrade_order('--single', '--compare')
+
+    def test_margin_upgrade_compare_then_single_preserves_both_ledgers(self):
+        self.check_margin_upgrade_order('--compare', '--single')
 
     def test_previous_percentage_install_migrates_to_full_range(self):
         self.install()

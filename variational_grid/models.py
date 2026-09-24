@@ -48,7 +48,7 @@ class Config:
     grid_step_percent: str | None = None
     max_levels: int = 8
     paper_leverage: str = "5"
-    max_margin_fraction: str = "0.80"
+    max_margin_fraction: str | None = "0.80"  # None disables the paper funding cap.
     max_drawdown_fraction: str = "0.20"
     max_holding_hours: int = 168
     slippage_bps_per_leg: str = "1"
@@ -68,6 +68,8 @@ class Config:
         if self.grid_step_percent is not None and not D("0") < dec(self.grid_step_percent) <= D("100"):
             raise GridError("grid_step_percent must be in (0, 100]; 1 means 1%")
         for name in ("max_margin_fraction", "max_drawdown_fraction"):
+            if name == "max_margin_fraction" and self.max_margin_fraction is None:
+                continue
             if not D("0") < dec(getattr(self, name)) < D("1"):
                 raise GridError(f"{name} must be between 0 and 1")
         for name in ("fee_bps_per_leg", "slippage_bps_per_leg"):

@@ -1,8 +1,10 @@
-"""Upgrade known comparison defaults to +/-30% without rewriting any ledger."""
+"""Version strategy defaults into new runs without rewriting any old ledger."""
+from contextlib import closing
 import json
 import os
 from pathlib import Path
 import tempfile
+import sqlite3
 
 from .comparison import Experiment
 from .models import GridError, dec
@@ -19,7 +21,7 @@ def upgrade_experiment(path):
     names = {r.get("name") for r in rows}
     old_output = Path(data["output_dir"])
     # This version already applied; preserve subsequent user edits on repeated installs.
-    if old_output.name.endswith(("-range30", "-range30-center3d")):
+    if old_output.name.removesuffix("-unlimited-margin").endswith(("-range30", "-range30-center3d")):
         return None
     absolute = names == set(LEGACY)
     if len(rows) != 3 or not (absolute or names == set(PERCENT)):
@@ -104,6 +106,71 @@ def upgrade_center(path, *, comparison=True):
     if backup.exists() and backup.read_bytes() != original:
         raise GridError("Three-day backup already contains different settings")
     handle, temporary = tempfile.mkstemp(prefix=".center-upgrade-", suffix=".json", dir=path.parent)
+    temporary = Path(temporary)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump(data, stream, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        (Experiment.load if comparison else configuration)(temporary)
+        if not backup.exists():
+            with backup.open("xb") as stream:
+                stream.write(original)
+                stream.flush()
+                os.fsync(stream.fileno())
+            backup.chmod(path.stat().st_mode & 0o777)
+        temporary.chmod(path.stat().st_mode & 0o777)
+        os.replace(temporary, path)
+        return backup
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def upgrade_margin_limit(path, *, comparison=True):
+    """Remove the funding cap once; preserve geometry, user edits and old economics."""
+    from .cli import configuration
+    path = Path(path).resolve()
+    original = path.read_bytes()
+    data = json.loads(original.decode("utf-8-sig"))
+    current = Experiment.load(path) if comparison else configuration(path)
+    key = "output_dir" if comparison else "state_file"
+    old = Path(data[key])
+    marker = "-unlimited-margin"
+    # The versioned path also protects deliberate later changes, including a new cap.
+    if (old.name if comparison else old.stem).endswith(marker):
+        return None
+    configs = current.scenarios.values() if comparison else [current]
+    limited = any(c.max_margin_fraction is not None for c in configs)
+    if comparison:
+        manifest = current.output / "experiment.json"
+        if manifest.exists():
+            saved = json.loads(manifest.read_text(encoding="utf-8"))
+            # A --single upgrade can change the inherited base before --compare runs.
+            limited |= any(c.get("max_margin_fraction", "0.80") is not None for c in saved["scenarios"].values())
+    elif not limited and Path(current.state_file).exists():
+        try:
+            with closing(sqlite3.connect(Path(current.state_file).as_uri() + "?mode=ro", uri=True)) as db:
+                row = db.execute("SELECT value FROM meta WHERE key='config'").fetchone()
+                limited = row is not None and json.loads(row[0]).get("max_margin_fraction", "0.80") is not None
+        except sqlite3.Error:
+            raise GridError("Cannot inspect saved paper strategy; configuration left unchanged") from None
+    if not limited:
+        return None
+    if comparison:
+        for row in data["scenarios"]:
+            row["overrides"]["max_margin_fraction"] = None
+    else:
+        data["max_margin_fraction"] = None
+    new = old.with_name(old.name + marker) if comparison else old.with_name(old.stem + marker + old.suffix)
+    target = (path.parent / new).resolve()
+    if target.exists():
+        raise GridError("Unlimited-margin target already exists; old data and configuration preserved")
+    data[key] = str(new)
+    backup = path.with_name(path.stem + ".before-unlimited-margin" + path.suffix)
+    if backup.exists() and backup.read_bytes() != original:
+        raise GridError("Unlimited-margin backup already contains different settings")
+    handle, temporary = tempfile.mkstemp(prefix=".margin-upgrade-", suffix=".json", dir=path.parent)
     temporary = Path(temporary)
     try:
         with os.fdopen(handle, "w", encoding="utf-8") as stream:
