@@ -1,6 +1,6 @@
-"""Journaled nine-account QQQ / US100 paper experiment and public-feed runner."""
+"""Journaled QQQ / US100 paper comparison and public-feed runner."""
 from contextlib import closing, nullcontext
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 import base64
 import html
 import json
@@ -16,11 +16,13 @@ from .comparison import Cohort, write_json
 from .models import D, GridError, dec, utc
 from .qqq_hedge import QQQConfig, QQQEngine, QQQSettings, QQQStore, digest, encoded, hedge_target
 from .qqq_market import RequestDeferred
+from .qqq_pricing import QQQPricing, ReferenceCache, source_valid, reference_price
 
 
 def summary_record(summary):
     return encoded({"qqq_compact": 1, "history": {"pnl": [r["total_pnl_usdc"] for r in summary["scenarios"]],
-                    "exposure": [r["signed_exposure_percent"] for r in summary["scenarios"]], "gap": summary["market"].get("gap", False)},
+                    "exposure": [r["signed_exposure_percent"] for r in summary["scenarios"]],
+                    "net_exposure": [r["net_exposure_usdc"] for r in summary["scenarios"]], "gap": summary["market"].get("gap", False)},
                     "state": base64.b64encode(zlib.compress(encoded(summary).encode(), 3)).decode("ascii")})
 
 
@@ -49,6 +51,8 @@ class QQQExperiment:
     output: Path
     scenarios: dict
     settings: QQQSettings
+    pricing: QQQPricing = field(default_factory=QQQPricing)
+    previous_output: Path | None = None
     kind = "qqq_hedge"
 
     @classmethod
@@ -57,11 +61,13 @@ class QQQExperiment:
         path = Path(path).resolve()
         try:
             data = json.loads(path.read_text(encoding="utf-8-sig"))
-            if set(data) != {"kind", "base_config", "output_dir", "strategy", "scenarios"} or data["kind"] != cls.kind:
+            required = {"kind", "base_config", "output_dir", "strategy", "scenarios"}
+            if not required <= set(data) <= required | {"pricing", "previous_output_dir"} or data["kind"] != cls.kind:
                 raise ValueError()
             base_path = (path.parent / data["base_config"]).resolve()
             old = configuration(base_path)
             settings = QQQSettings(**data["strategy"]).validate()
+            pricing = QQQPricing.load(data.get("pricing", {}))
             base = SimpleNamespace(session_file=old.session_file, poll_seconds=settings.poll_seconds)
             output = (path.parent / data["output_dir"]).resolve()
             if any(p.is_relative_to(output) for p in (path, base_path, Path(old.session_file), Path(old.state_file))):
@@ -70,17 +76,23 @@ class QQQExperiment:
                 raise ValueError()
             scenarios, combinations = {}, set()
             for item in data["scenarios"]:
-                if set(item) != {"name", "grid_step_percent", "hedge_tolerance_percent"}:
+                dollars = "hedge_threshold_usdc" in item
+                if set(item) != {"name", "grid_step_percent", "hedge_threshold_usdc" if dollars else "hedge_tolerance_percent"}:
                     raise ValueError()
                 name = item["name"]
                 if not isinstance(name, str) or not re.fullmatch(r"[a-zA-Z0-9][a-zA-Z0-9._-]{0,39}", name) or name.lower() in {n.lower() for n in scenarios}:
                     raise ValueError()
-                step, tolerance = dec(item["grid_step_percent"]), dec(item["hedge_tolerance_percent"])
-                if not 0 < step * settings.grid_count < 100 or not 0 <= tolerance < 100 or (step, tolerance) in combinations:
+                step, tolerance = dec(item["grid_step_percent"]), dec(item["hedge_threshold_usdc"] if dollars else item["hedge_tolerance_percent"])
+                if not 0 < step * settings.grid_count < 100 or not (tolerance > 0 if dollars else 0 <= tolerance < 100) or (step, dollars, tolerance) in combinations:
                     raise ValueError()
-                combinations.add((step, tolerance))
-                scenarios[name] = QQQConfig(settings, name, str(step), str(tolerance), str(output / "ledgers" / (name + ".sqlite3")))
-            return cls(base, output, scenarios, settings)
+                combinations.add((step, dollars, tolerance))
+                scenarios[name] = QQQConfig(settings, name, str(step), None if dollars else str(tolerance), str(output / "ledgers" / (name + ".sqlite3")), str(tolerance) if dollars else None, pricing.half_spread_percent)
+            if len({c.hedge_threshold_usdc is not None for c in scenarios.values()}) != 1:
+                raise GridError("QQQ scenarios must use the same hedge threshold unit")
+            previous_output = (path.parent / data["previous_output_dir"]).resolve() if data.get("previous_output_dir") else None
+            if previous_output == output:
+                raise GridError("Previous QQQ output must be different from the new output")
+            return cls(base, output, scenarios, settings, pricing, previous_output)
         except (OSError, ValueError, TypeError, KeyError, AttributeError):
             raise GridError("Invalid QQQ hedge experiment; require separate output and unique spacing/tolerance scenarios") from None
 
@@ -108,6 +120,11 @@ class QQQFrame:
 
     def validate(self, experiment):
         settings = experiment.settings
+        policy = QQQPricing.load(self.market["pricing_policy"]) if "pricing_policy" in self.market else None
+        if policy and policy.mode != "shared_indicative_v1":
+            raise GridError("Invalid shared reference frame policy")
+        if policy and any(c.half_spread_percent != policy.half_spread_percent for c in experiment.scenarios.values()):
+            raise GridError("Paper half spread differs from experiment economics")
         if not math.isfinite(self.ts) or self.ts <= 0 or self.data_kind not in {"synthetic", "live_indicative"} or set(self.plans) != set(experiment.scenarios):
             raise GridError("Invalid QQQ shared observation")
         q = self.market["lighter"]
@@ -137,18 +154,34 @@ class QQQFrame:
         var = self.market["var"]
         if var and not q["ready"]:
             raise GridError("Unavailable QQQ source cannot support hedge valuation")
+        if var and policy and (not source_valid(var, var) or self.ts >= (var.get("closes_at") or 0)
+                              or not -2 <= self.ts - var["metadata_ts"] <= 120 or not var["market_open"]):
+            raise GridError("Invalid or closed US100 reference market")
+        if var and policy:
+            original = {**var, "bid": var.get("source_bid"), "ask": var.get("source_ask")}
+            if not source_valid(original, original):
+                raise GridError("Invalid original reference bid/ask")
+            expected = reference_price(original, policy)
+            if dec(var["bid"]) != dec(expected["bid"]) or dec(var["ask"]) != dec(expected["ask"]):
+                raise GridError("Paper reference spread differs from frame policy")
         for quote in ([var] if var else []) + list(self.quotes.values()):
             if dec(quote["bid"]) <= 0 or dec(quote["ask"]) < dec(quote["bid"]) or dec(quote["mark"]) <= 0 or dec(quote["qty"]) <= 0:
                 raise GridError("Invalid Var indicative quote")
-            if not math.isfinite(quote["ts"]) or not -2 <= self.ts - quote["ts"] <= settings.max_quote_age_seconds:
+            if not math.isfinite(quote["ts"]) or not -2 <= self.ts - quote["ts"] <= (policy.max_age_seconds if policy else settings.max_quote_age_seconds):
                 raise GridError("Var indicative quote is stale")
-            if abs(q["ts"] - quote["ts"]) > settings.max_pair_skew_seconds:
+            if not policy and abs(q["ts"] - quote["ts"]) > settings.max_pair_skew_seconds:
                 raise GridError("QQQ and US100 observations are too far apart")
             if dec(quote["size_step"]) <= 0 or dec(quote["qty"]) % dec(quote["size_step"]):
                 raise GridError("Invalid Var quantity increment")
         for key, quote in self.quotes.items():
             if key != format(dec(quote["qty"]).normalize(), "f") or not dec(quote["min_qty"]) <= dec(quote["qty"]) <= dec(quote["max_qty"]):
                 raise GridError("Var quantity-specific quote mismatch")
+            if policy:
+                if not var or quote.get("pricing_mode") != policy.mode or dec(quote.get("source_qty", "0")) != dec(var["qty"]):
+                    raise GridError("Invalid shared reference quantity provenance")
+                for field_name in ("bid", "ask", "mark", "ts", "source_ts", "received_ts", "min_qty", "max_qty", "size_step", "close_only", "source_bid", "source_ask"):
+                    if quote.get(field_name) != var.get(field_name):
+                        raise GridError("Paper estimate differs from shared source price")
         if self.market["allow_entries"] and (not var or not q["ready"] or q["gap"] or q.get("close_only", False) or var.get("close_only", False)):
             raise GridError("Cannot open grid entries with incomplete market data")
         for plan in self.plans.values():
@@ -213,6 +246,10 @@ class QQQCohort(Cohort):
                               "var_source_ts": v["ts"] if v else None,
                               "source_status": "ready" if frame.market["allow_entries"] else "paused_entries",
                               "source_reason": frame.market.get("reason", ""), "gap": q["gap"]}}
+        if "pricing_policy" in frame.market:
+            previous_start = previous.get("pricing_since_utc") if previous and previous.get("pricing") == frame.market["pricing_policy"] else None
+            summary.update(pricing=frame.market["pricing_policy"], pricing_since_utc=previous_start or utc(frame.ts))
+            summary["market"]["quote_cache"] = frame.market["quote_cache"]
         with self.db:
             self.db.execute("INSERT INTO summaries VALUES (?,?)", (frame.ts, summary_record(summary)))
         self.set_runtime("running" if frame.market["allow_entries"] else "degraded", frame.market.get("reason") or None)
@@ -236,13 +273,16 @@ class QQQMarketFeed:
         from .qqq_market import LighterClient, VarSwapClient
         self.experiment = experiment
         self.lighter = lighter or LighterClient()
-        self.var = var or VarSwapClient()
+        self.var = var or VarSwapClient(max_age_seconds=experiment.pricing.max_age_seconds if experiment.pricing.mode == "shared_indicative_v1" else 10)
         self._quote_cursor = 0
         self._cooldown_path = experiment.output / "market-cooldowns.json"
         self._saved_cooldowns = None
-        if self._cooldown_path.exists():
+        cooldown_source = self._cooldown_path
+        if not cooldown_source.exists() and experiment.previous_output:
+            cooldown_source = experiment.previous_output / "market-cooldowns.json"
+        if cooldown_source.exists():
             try:
-                saved = json.loads(self._cooldown_path.read_text(encoding="utf-8"))
+                saved = json.loads(cooldown_source.read_text(encoding="utf-8"))
                 if not isinstance(saved, dict):
                     raise ValueError()
                 for client in (self.lighter, self.var):
@@ -251,6 +291,8 @@ class QQQMarketFeed:
                         transport.restore(saved[transport.venue])
             except (OSError, ValueError, TypeError):
                 raise GridError("Cannot read saved market cooldowns") from None
+        self.reference = ReferenceCache(self.var, experiment.output / "quote-cache.json", experiment.pricing, write_export,
+                                        experiment.previous_output / "quote-cache.json" if experiment.previous_output else None) if experiment.pricing.mode == "shared_indicative_v1" else None
 
     def save_cooldowns(self):
         state = {client.transport.venue: client.transport.state() for client in (self.lighter, self.var)
@@ -264,11 +306,41 @@ class QQQMarketFeed:
         try:
             transport = getattr(self.var, "transport", None)
             with transport.quote_batch() if transport else nullcontext():
-                return self._next(cohort)
+                return self._next_shared(cohort) if self.reference else self._next(cohort)
         finally:
             # Persist even when Lighter fails before a frame can be published.
             # The ledger reset deliberately leaves this transport state intact.
             self.save_cooldowns()
+
+    def _next_shared(self, cohort):
+        q = self.lighter.snapshot()
+        var, status = self.reference.read()
+        now = time.time()
+        # Quote retrieval may take time; never refresh the source timestamp.
+        var = self.reference.usable(now)
+        status.update(available=var is not None, age_seconds=max(0, now - status["source_ts"]) if status["source_ts"] is not None else None)
+        reason = q.get("reason", "")
+        if not q["ready"] or not -2 <= now - q["ts"] <= self.experiment.settings.max_quote_age_seconds:
+            var, reason = None, reason or "QQQ observation delayed; account known fills and defer new decisions"
+        elif var is None:
+            reason = status["refresh_error"] or "US100 缓存过期或市场状态不可用，等待有效报价"
+        if q.get("close_only", False) or (var or {}).get("close_only", False):
+            reason = "Venue in close-only mode; maker entries paused"
+        if var:
+            var = reference_price(var, self.experiment.pricing)
+        market = {"lighter": q, "var": var, "reason": reason, "pricing_policy": asdict(self.experiment.pricing),
+                  "quote_cache": status,
+                  "allow_entries": bool(var and q["ready"] and not q["gap"] and not q.get("close_only", False) and not var["close_only"])}
+        frame = cohort.prepare_frame(now, market)
+        if var:
+            for name, plan in frame.plans.items():
+                change = abs(dec(plan["target"]) - dec(cohort.stores[name].account()["us100"]["qty"]))
+                if change and dec(var["min_qty"]) <= change <= dec(var["max_qty"]):
+                    key = format(change.normalize(), "f")
+                    frame.quotes[key] = {**var, "qty": key, "source_qty": var["qty"],
+                                         "pricing_mode": self.experiment.pricing.mode, "cache_used": status["cache_used"]}
+        frame.validate(self.experiment)
+        return frame
 
     def _next(self, cohort):
         q = self.lighter.snapshot()
@@ -402,11 +474,13 @@ def read_qqq_dashboard(experiment, window):
             data = json.loads(raw)
             history = data["history"] if data.get("qqq_compact") == 1 else {
                 "gap": data["market"].get("gap", False), "pnl": [r["total_pnl_usdc"] for r in data["scenarios"]],
-                "exposure": [r["signed_exposure_percent"] for r in data["scenarios"]]}
+                "exposure": [r["signed_exposure_percent"] for r in data["scenarios"]],
+                "net_exposure": [r["net_exposure_usdc"] for r in data["scenarios"]]}
             if previous is not None and (ts - previous > max(15, experiment.settings.poll_seconds * 3) or history["gap"]):
                 segment += 1
             points.append({"ts": ts, "segment": segment, "pnl": [float(v) for v in history["pnl"]],
-                           "exposure": [float(v) for v in history["exposure"]]})
+                           "exposure": [float(v) for v in history["exposure"]],
+                           "net_exposure": [float(v) for v in history["net_exposure"]] if "net_exposure" in history else [None] * len(names)})
             previous = ts
         source_count = len(points)
         if source_count > 900:
@@ -416,7 +490,7 @@ def read_qqq_dashboard(experiment, window):
             for bucket in range(buckets):
                 lo, hi = bucket * source_count // buckets, (bucket + 1) * source_count // buckets
                 selected.update((lo, hi - 1))
-                for key in ("pnl", "exposure"):
+                for key in ("pnl", "net_exposure" if summary["scenarios"][0].get("hedge_threshold_usdc") is not None else "exposure"):
                     for j in range(len(names)):
                         selected.add(min(range(lo, hi), key=lambda i: points[i][key][j]))
                         selected.add(max(range(lo, hi), key=lambda i: points[i][key][j]))
@@ -463,13 +537,18 @@ def demo_qqq(args):
                                               {"id": str(i * 2 + 1), "ts": ts, "side": "buy", "price": str(mark), "qty": "20"}]}
             def quote(qty):
                 return {"ts": ts, "qty": str(qty), "bid": str(vmark - D(".1")), "ask": str(vmark + D(".1")), "mark": str(vmark),
-                        "size_step": ".000001", "min_qty": ".000004", "max_qty": "10000", "market_open": True}
-            market = {"lighter": q, "var": quote(".01"), "allow_entries": True, "reason": "Synthetic demonstration; not a historical backtest"}
+                        "size_step": ".000001", "min_qty": ".000004", "max_qty": "10000", "market_open": True,
+                        "symbol": "US100S", "instrument_type": "swap", "multiplier": "1", "quantity_unit": "index_unit",
+                        "close_only": False, "closes_at": ts + 3600, "metadata_ts": ts, "received_ts": ts, "source_ts": ts}
+            source = reference_price(quote(".01"), experiment.pricing)
+            market = {"lighter": q, "var": source, "allow_entries": True, "reason": "Synthetic demonstration; not a historical backtest",
+                      "pricing_policy": asdict(experiment.pricing), "quote_cache": {**asdict(experiment.pricing),
+                      "source_ts": ts, "source_qty": ".01", "available": True, "cache_used": False, "age_seconds": 0, "refresh_error": ""}}
             frame = cohort.prepare_frame(ts, market, data_kind="synthetic")
             for name, plan in frame.plans.items():
                 amount = abs(dec(plan["target"]) - dec(cohort.stores[name].account()["us100"]["qty"]))
                 if amount >= D(".000004"):
-                    frame.quotes[format(amount.normalize(), "f")] = quote(amount)
+                    frame.quotes[format(amount.normalize(), "f")] = {**source, "qty": str(amount), "source_qty": ".01", "pricing_mode": experiment.pricing.mode, "cache_used": False}
             cohort.ingest(frame)
         emit({"demo": "synthetic_not_backtest", "experiments": str(path), "accounts": len(experiment.scenarios),
               "scenarios": [{k: r[k] for k in ("name", "total_pnl_usdc", "turnover_usdc")} for r in cohort.latest()["scenarios"]]})

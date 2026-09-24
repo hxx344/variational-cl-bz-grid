@@ -16,6 +16,7 @@ from variational_grid.qqq_hedge import QQQConfig, QQQSettings, book_fill, exposu
 from variational_grid.qqq_comparison import QQQCohort, QQQExperiment, QQQFrame, QQQMarketFeed, read_qqq_dashboard
 from variational_grid.reset import process_reset, read_state, request_reset
 from variational_grid.qqq_market import LighterClient, VarSwapClient, RequestDeferred
+from variational_grid.qqq_pricing import QQQPricing
 
 
 def quote(ts, qty=".01", mark="30000"):
@@ -59,6 +60,23 @@ class BudgetedVar:
 
 
 class MechanicsTests(unittest.TestCase):
+    def test_dollar_threshold_and_signed_half_target_do_not_use_gross_ratio(self):
+        config = replace(self.config, hedge_tolerance_percent=None, hedge_threshold_usdc="3000")
+        for net, expected in [(3000, 0), (-3000, 0), (3001, 1500), (-3001, -1500)]:
+            account = initial_account()
+            account["qqq"]["qty"] = "100"
+            account["us100"]["qty"] = str((D(net) - 10000) / 100)
+            old = D(account["us100"]["qty"])
+            target = hedge_target(account, "100", "100", config, ".000001")
+            if expected == 0:
+                self.assertEqual(target, old)
+            else:
+                self.assertEqual(D(10000) + target * 100, expected)
+        account["qqq"]["qty"], account["us100"]["qty"] = "0", "-20"
+        self.assertEqual(hedge_target(account, "100", "100", config, ".000001"), D("-20"))
+        account["us100"]["qty"] = "-40"
+        self.assertEqual(hedge_target(account, "100", "100", config, ".000001"), D("-15"))
+
     def setUp(self):
         self.settings = QQQSettings(grid_count=2)
         self.config = QQQConfig(self.settings, "test", "1", "2", "unused")
@@ -170,7 +188,7 @@ class CohortTests(unittest.TestCase):
         self.settings = QQQSettings(grid_count=2)
         self.output = self.root / "paper"
         configs = {f"band-{h}": QQQConfig(self.settings, f"band-{h}", "1", h, str(self.output / "ledgers" / (h + ".sqlite3"))) for h in ("0", "2", "5")}
-        self.experiment = QQQExperiment(SimpleNamespace(poll_seconds=2), self.output, configs, self.settings)
+        self.experiment = QQQExperiment(SimpleNamespace(poll_seconds=2), self.output, configs, self.settings, QQQPricing(mode="exact_quantity"))
 
     def frame(self, cohort, ts, trades=(), var=True):
         m = {"lighter": market(ts, trades), "var": quote(ts) if var else None, "allow_entries": var, "reason": ""}
@@ -239,14 +257,14 @@ class CohortTests(unittest.TestCase):
             archive = self.output / "archives" / read_state(self.experiment)["archive_id"]
             self.assertTrue((archive / "complete.json").is_file())
 
-    def test_configuration_defaults_nine_and_independent_of_legacy_economics(self):
+    def test_configuration_defaults_three_and_independent_of_legacy_economics(self):
         template = json.loads(Path("qqq-hedge.example.json").read_text())
         (self.root / "base.json").write_text(json.dumps(asdict(Config())))
         template.update(base_config="base.json", output_dir="paper")
         path = self.root / "qqq.json"
         path.write_text(json.dumps(template))
         experiment = Experiment.load(path)
-        self.assertEqual(len(experiment.scenarios), 9)
+        self.assertEqual(len(experiment.scenarios), 3)
         identity = experiment.identity()
         (self.root / "base.json").write_text(json.dumps(asdict(Config(paper_leverage="100"))))
         self.assertEqual(Experiment.load(path).identity(), identity)

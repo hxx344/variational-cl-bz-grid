@@ -1,7 +1,13 @@
 {
   "kind": "qqq_hedge",
   "base_config": "config.example.json",
-  "output_dir": "data/qqq-hedge",
+  "output_dir": "data/qqq-hedge-usd3000-hs0015-v1",
+  "pricing": {
+    "mode": "shared_indicative_v1",
+    "refresh_after_seconds": 3,
+    "max_age_seconds": 60,
+    "half_spread_percent": "0.0015"
+  },
   "strategy": {
     "grid_count": 30,
     "order_notional_usdc": "1000",
@@ -13,55 +19,25 @@
     "hedge_reset_fraction": "0.5",
     "lighter_fee_bps": "0",
     "var_fee_bps": "0",
-    "var_slippage_bps": "1",
+    "var_slippage_bps": "0",
     "max_quote_age_seconds": 15,
     "max_pair_skew_seconds": 10
   },
   "scenarios": [
     {
-      "name": "grid-0.05-hedge-0",
+      "name": "grid-0.05-hedge-3000usd",
       "grid_step_percent": "0.05",
-      "hedge_tolerance_percent": "0"
+      "hedge_threshold_usdc": "3000"
     },
     {
-      "name": "grid-0.05-hedge-2",
-      "grid_step_percent": "0.05",
-      "hedge_tolerance_percent": "2"
-    },
-    {
-      "name": "grid-0.05-hedge-5",
-      "grid_step_percent": "0.05",
-      "hedge_tolerance_percent": "5"
-    },
-    {
-      "name": "grid-0.1-hedge-0",
+      "name": "grid-0.1-hedge-3000usd",
       "grid_step_percent": "0.1",
-      "hedge_tolerance_percent": "0"
+      "hedge_threshold_usdc": "3000"
     },
     {
-      "name": "grid-0.1-hedge-2",
-      "grid_step_percent": "0.1",
-      "hedge_tolerance_percent": "2"
-    },
-    {
-      "name": "grid-0.1-hedge-5",
-      "grid_step_percent": "0.1",
-      "hedge_tolerance_percent": "5"
-    },
-    {
-      "name": "grid-0.2-hedge-0",
+      "name": "grid-0.2-hedge-3000usd",
       "grid_step_percent": "0.2",
-      "hedge_tolerance_percent": "0"
-    },
-    {
-      "name": "grid-0.2-hedge-2",
-      "grid_step_percent": "0.2",
-      "hedge_tolerance_percent": "2"
-    },
-    {
-      "name": "grid-0.2-hedge-5",
-      "grid_step_percent": "0.2",
-      "hedge_tolerance_percent": "5"
+      "hedge_threshold_usdc": "3000"
     }
   ]
 }

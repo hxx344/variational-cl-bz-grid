@@ -224,11 +224,13 @@ if name == "runuser":
         path = self.conf / 'qqq-hedge.json'
         spec = json.loads(path.read_text())
         self.assertEqual(spec['kind'], 'qqq_hedge')
-        self.assertEqual(len(spec['scenarios']), 9)
+        self.assertEqual(len(spec['scenarios']), 3)
         self.assertEqual({s['grid_step_percent'] for s in spec['scenarios']}, {'0.05', '0.1', '0.2'})
-        self.assertEqual({s['hedge_tolerance_percent'] for s in spec['scenarios']}, {'0', '2', '5'})
+        self.assertEqual({s['hedge_threshold_usdc'] for s in spec['scenarios']}, {'3000'})
+        self.assertEqual(spec['strategy']['var_slippage_bps'], '0')
+        self.assertEqual(spec['pricing']['half_spread_percent'], '0.0015')
         self.assertEqual(spec['base_config'], str(self.conf / 'config.json'))
-        self.assertEqual(spec['output_dir'], str(self.state / 'qqq-hedge'))
+        self.assertEqual(spec['output_dir'], str(self.state / 'qqq-hedge-usd3000-hs0015-v1'))
         output = Path(spec['output_dir'])
         output.mkdir(exist_ok=True)
         sentinel = output / 'existing-ledger'
@@ -244,6 +246,30 @@ if name == "runuser":
         self.assertNotIn(['systemctl', 'daemon-reload'], self.calls())
         self.assertFalse(any(c[0] == 'apt-get' or c[0] == 'git' and
                              any(arg in ('fetch', 'clone', 'archive') for arg in c[1:]) for c in self.calls()))
+
+    def test_qqq_default_nine_upgrade_starts_three_without_rewriting_history(self):
+        from test_qqq_migration import legacy_spec
+        self.install('--qqq-hedge')
+        path = self.conf / 'qqq-hedge.json'
+        old_output = self.state / 'qqq-hedge'
+        old_output.mkdir()
+        sentinel = old_output / 'old-ledger'
+        sentinel.write_bytes(b'old nine-account history')
+        path.write_text(json.dumps(legacy_spec(str(self.conf / 'config.json'), str(old_output))))
+        old_bytes = path.read_bytes()
+        self.log.write_text('')
+        self.install()
+        new = json.loads(path.read_text())
+        self.assertEqual(len(new['scenarios']), 3)
+        self.assertEqual(new['previous_output_dir'], str(old_output))
+        self.assertEqual(sentinel.read_bytes(), b'old nine-account history')
+        self.assertEqual(path.with_name('qqq-hedge.before-usd3000-hs0015-v1.json').read_bytes(), old_bytes)
+        self.assertEqual(self.restarts(), ['variational-grid.service', 'variational-grid-web.service'])
+        original = path.read_bytes()
+        self.log.write_text('')
+        self.install()
+        self.assertEqual(path.read_bytes(), original)
+        self.assertEqual(self.restarts(), [])
 
     def test_qqq_switch_preserves_old_ledgers_and_ignores_legacy_economic_migrations(self):
         from variational_grid.comparison import Experiment

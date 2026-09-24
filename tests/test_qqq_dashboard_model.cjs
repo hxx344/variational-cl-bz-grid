@@ -98,3 +98,32 @@ test('rate limit countdown uses server time and elapsed time, never claims recov
   assert.equal(Q.cooldownNotice({server_ts:100},0),'');
   assert.equal(Q.cooldownNotice({server_ts:100,rate_limits:[{venue:'invalid',retry_at:1000}]},0),'');
 });
+
+test('shared reference status preserves source time and distinguishes usable cache from expiry', () => {
+  const data = {server_ts:120,summary:{market:{quote_cache:{mode:'shared_indicative_v1',source_ts:100,max_age_seconds:60,available:true,cache_used:true,refresh_error:'429'}}}};
+  const active = Q.referenceStatus(data,5);
+  assert.equal(active.age,25);
+  assert.equal(active.usable,true);
+  assert.match(active.label,/缓存估算/);
+  assert.equal(Q.referenceStatus(data,41).usable,false);
+  data.summary.market.quote_cache.available = false;
+  assert.equal(Q.referenceStatus(data,0).usable,false);
+  assert.equal(Q.referenceStatus({summary:{market:{}}},0),null);
+});
+
+test('dollar thresholds and history retain USDC units without percent chart clipping', () => {
+  const row = {grid_step_percent:'.1',hedge_threshold_usdc:'3000',hedge_tolerance_percent:null};
+  assert.equal(Q.dollarHedge(row),true);
+  assert.match(Q.label(row),/3,000 USDC/);
+  const domain = Q.dollarExposureDomain([-4500,1000],3000);
+  assert.ok(domain[0] < -4500 && domain[1] > 4500);
+  assert.equal(Q.historyValue({names:['a']},{net_exposure:[1500],exposure:[2]},'a','net_exposure'),1500);
+  assert.equal(Q.dollarHedge({hedge_tolerance_percent:2}),false);
+});
+
+test('paper fill provenance distinguishes old exact quotes from fixed half spread estimates', () => {
+  assert.equal(Q.fillPricing({venue:'Variational'}),'原精确数量报价');
+  const label = Q.fillPricing({pricing_mode:'shared_indicative_v1',cache_used:true,quote_age_seconds:4,source_qty:'.01',half_spread_percent:'.0015'});
+  assert.match(label,/缓存参考价估算/);
+  assert.match(label,/半点差 0.0015%/);
+});

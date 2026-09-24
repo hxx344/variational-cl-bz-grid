@@ -4,7 +4,9 @@
   const M = typeof module !== 'undefined' && module.exports ? require('./model.js') : root.GridModel;
   const colors = ['#285de5', '#098477', '#8051a2'], dashes = ['', '7 3', '2 3'];
   const percent = (value, digits = 2) => M.finite(value) ? M.number(value, digits) + '%' : '—';
-  const label = row => row ? `网格 ${percent(row.grid_step_percent, 2)} / 对冲 ${percent(row.hedge_tolerance_percent, 0)}` : '未知账户';
+  const dollarHedge = row => M.finite(row?.hedge_threshold_usdc);
+  const hedgeLimit = row => dollarHedge(row) ? M.number(row.hedge_threshold_usdc, 0) + ' USDC' : percent(row?.hedge_tolerance_percent, 0);
+  const label = row => row ? `网格 ${percent(row.grid_step_percent, 2)} / 对冲 ${hedgeLimit(row)}` : '未知账户';
   function encoding(row) {
     return {color:Math.max(0, [.05, .1, .2].indexOf(Number(row?.grid_step_percent))), dash:Math.max(0, [0, 2, 5].indexOf(Number(row?.hedge_tolerance_percent)))};
   }
@@ -62,7 +64,25 @@
     return (data?.rate_limits || []).filter(r => ['Lighter', 'Variational'].includes(r.venue) && M.finite(r.retry_at))
       .map(r => `${r.venue} HTTP 429 限流：${Number(r.retry_at) > now ? Math.ceil(Number(r.retry_at) - now) + ' 秒后重试' : '冷却结束，等待下一次行情结果'}`).join('；');
   }
-  const helpers = {percent, label, encoding, reconciliation, sampleIndex, exposureDomain, historyValue, freshness, marketStatus, hedgeStatus, cooldownNotice};
+  function dollarExposureDomain(values, threshold) {
+    const valid = values.filter(M.finite).map(v => Math.abs(Number(v)));
+    if (M.finite(threshold)) valid.push(Math.abs(Number(threshold)));
+    const bound = Math.max(1, ...valid) * 1.15;
+    return [-bound, bound];
+  }
+  function referenceStatus(data, elapsedSeconds = 0) {
+    const cache = data?.summary?.market?.quote_cache;
+    if (!cache || cache.mode !== 'shared_indicative_v1') return null;
+    const age = M.finite(cache.source_ts) && M.finite(data.server_ts) ? Math.max(0, Number(data.server_ts) + Math.max(0, elapsedSeconds) - Number(cache.source_ts)) : null;
+    const usable = cache.available === true && age !== null && age <= Number(cache.max_age_seconds);
+    const label = age === null ? '等待首份参考报价' : !usable ? `参考价不可用 · 报价已有 ${Math.floor(age)} 秒` : `${cache.cache_used ? '缓存估算' : '共享参考价估算'} · 报价已有 ${Math.floor(age)} 秒`;
+    return {age, usable, label, limit:cache.max_age_seconds, error:cache.refresh_error || ''};
+  }
+  function fillPricing(row) {
+    if (row?.pricing_mode === 'shared_indicative_v1') return `${row.cache_used ? '缓存参考价估算' : '共享参考价估算'} · 报价龄 ${M.number(row.quote_age_seconds, 1)} 秒 · 源数量 ${M.number(row.source_qty, 6)}${row.half_spread_percent == null ? '' : ' · 半点差 ' + percent(row.half_spread_percent, 4)}`;
+    return row?.venue === 'Variational' ? '原精确数量报价' : 'Maker 队列模拟';
+  }
+  const helpers = {percent, label, encoding, reconciliation, sampleIndex, exposureDomain, dollarExposureDomain, dollarHedge, hedgeLimit, historyValue, freshness, marketStatus, hedgeStatus, cooldownNotice, referenceStatus, fillPricing};
   if (typeof module !== 'undefined' && module.exports) {module.exports = helpers; return;}
   root.QQQModel = helpers;
   const $ = id => document.getElementById(id), E = M.escape;
@@ -104,12 +124,15 @@
     $('market-status').textContent = marketStatus(data, f, disconnected);
     $('freshness').textContent = f.age === null ? '等待第一份有效采样' : `${M.date(s.ts)} · ${Math.floor(f.age)} 秒前 · 每 ${M.number(s.poll_seconds, 0)} 秒采样`;
     let notice = '';
-    const cooldown = cooldownNotice(data, (Date.now() - received) / 1000);
+    const elapsed = (Date.now() - received) / 1000, cooldown = cooldownNotice(data, elapsed), reference = referenceStatus(data, elapsed);
+    if (reference) $('us100-source-time').textContent = `${M.date(s?.market?.var_source_ts ?? s?.market?.quote_cache?.source_ts)} · ${reference.label}`;
     if (disconnected) notice = '无法连接监控服务，保留上次成功读取的数据。页面会自动重试。';
     else if (runtime === 'stopped') notice = '模拟进程已停止，以下为最后保存的数据。';
-    else if (cooldown) notice = cooldown + '。暂停新网格入场，保留已有仓位和已确认的模拟成交。';
     else if (runtime === 'paused') notice = '行情暂停，保留最近有效采样：' + sourceReason(data.runtime.reason);
+    else if (cooldown) notice = cooldown + (reference?.usable && s?.market?.source_status === 'ready' ? `。${reference.label}，模拟继续。` : '。暂停新网格入场，保留已有仓位和已确认的模拟成交。');
     else if (f.stale) notice = '行情已过期，收益和仓位估值停留在最后有效采样。';
+    else if (reference && !reference.usable) notice = `${reference.label}，等待刷新；缓存最长使用 ${reference.limit} 秒。`;
+    else if (reference?.error && s?.market?.source_status === 'ready') notice = `刷新暂缓，${reference.label}，模拟继续。${reference.error}`;
     else if (s?.market?.gap) notice = '公共成交序列存在缺口；保留已知仓位与损益，暂停新网格入场。';
     else if (s?.market?.source_reason) notice = sourceReason(s.market.source_reason);
     else if (s && !data.details_available) notice = '汇总可用，对应仓位或成交明细暂不可用。';
@@ -127,36 +150,36 @@
     $('strategy-select').innerHTML = '<option value="all">全部账户</option>' + allRows().map(r => `<option value="${E(r.name)}">${E(label(r))}</option>`).join('');
     $('strategy-select').value = state.strategy;
     if (!allRows().length) {
-      $('strategies').innerHTML = '<div class="empty">暂无有效采样。收到共同市场行情后，将显示九个独立模拟账户。</div>';
+      $('strategies').innerHTML = '<div class="empty">暂无有效采样。收到共同市场行情后，将显示本轮独立模拟账户。</div>';
       $('account-total').textContent = '';
       return;
     }
     $('experiment-info').textContent = `${allRows().length} 个独立账户 · ${M.number(s.parameters?.grid_count ?? 30, 0)} 格 × 每格 ${M.number(s.parameters?.order_notional_usdc ?? 1000, 0)} USDC · ${M.number(s.sample_count, 0)} 次共同采样`;
-    $('strategies').innerHTML = allRows().map(r => `<button class="strategy ${cls(r)} ${state.strategy === r.name ? 'selected' : ''}" data-strategy="${E(r.name)}" aria-pressed="${state.strategy === r.name}" aria-label="查看${E(label(r))}"><div class="strategy-head"><h3>网格 ${percent(r.grid_step_percent, 2)}</h3><small>对冲容忍 ${percent(r.hedge_tolerance_percent, 0)}</small></div><span class="pnl-label">两腿累计净收益</span><strong class="big-pnl ${M.tone(r.total_pnl_usdc)}">${M.signed(r.total_pnl_usdc, 2)}<small>USDC</small></strong><div class="leg-pnls"><span>QQQ <b>${pnl(r.qqq?.total_pnl_usdc)}</b></span><span>US100 <b>${pnl(r.us100?.total_pnl_usdc)}</b></span></div><div class="strategy-stats"><div><span>实际敞口 / 容忍阈值</span><b>${percent(r.exposure_percent)} / ${percent(r.hedge_tolerance_percent, 0)}</b></div><div><span>净 / 总敞口（USDC）</span><b>${M.signed(r.net_exposure_usdc, 2)} / ${M.number(r.gross_exposure_usdc, 2)}</b></div><div><span>持仓格 / 待成交单</span><b>${M.number(r.open_slots, 0)} / ${M.number(r.resting_orders, 0)}</b></div><div><span>最大回撤 / USDC</span><b>${M.number(r.max_drawdown_usdc, 2)}</b></div></div><p class="control-status ${r.hedge_pending ? 'pending' : ''}">${E(hedgeStatus(r))}${reconciliation(r) === false ? ' · 两腿损益核对异常' : ''}</p></button>`).join('');
+    $('strategies').innerHTML = allRows().map(r => `<button class="strategy ${cls(r)} ${state.strategy === r.name ? 'selected' : ''}" data-strategy="${E(r.name)}" aria-pressed="${state.strategy === r.name}" aria-label="查看${E(label(r))}"><div class="strategy-head"><h3>网格 ${percent(r.grid_step_percent, 2)}</h3><small>对冲阈值 ${hedgeLimit(r)}</small></div><span class="pnl-label">两腿累计净收益</span><strong class="big-pnl ${M.tone(r.total_pnl_usdc)}">${M.signed(r.total_pnl_usdc, 2)}<small>USDC</small></strong><div class="leg-pnls"><span>QQQ <b>${pnl(r.qqq?.total_pnl_usdc)}</b></span><span>US100 <b>${pnl(r.us100?.total_pnl_usdc)}</b></span></div><div class="strategy-stats"><div><span>${dollarHedge(r) ? '绝对净敞口 / 对冲阈值' : '实际敞口 / 容忍阈值'}</span><b>${dollarHedge(r) ? M.number(Math.abs(Number(r.net_exposure_usdc)),2) : percent(r.exposure_percent)} / ${hedgeLimit(r)}</b></div><div><span>净 / 总敞口（USDC）</span><b>${M.signed(r.net_exposure_usdc, 2)} / ${M.number(r.gross_exposure_usdc, 2)}</b></div><div><span>持仓格 / 待成交单</span><b>${M.number(r.open_slots, 0)} / ${M.number(r.resting_orders, 0)}</b></div><div><span>最大回撤 / USDC</span><b>${M.number(r.max_drawdown_usdc, 2)}</b></div></div><p class="control-status ${r.hedge_pending ? 'pending' : ''}">${E(hedgeStatus(r))}${reconciliation(r) === false ? ' · 两腿损益核对异常' : ''}</p></button>`).join('');
     const values = allRows().map(r => r.total_pnl_usdc), total = values.every(M.finite) ? values.reduce((sum, value) => sum + Number(value), 0) : null;
-    $('account-total').textContent = `九账户净收益合计 ${M.signed(total, 2)} USDC · 仅为独立实验账户相加，不代表一个账户的收益率。`;
+    $('account-total').textContent = `${allRows().length} 账户净收益合计 ${M.signed(total, 2)} USDC · 仅为独立实验账户相加，不代表一个账户的收益率。`;
   }
   function drawChart(id, field) {
-    const host = $(id), points = data?.history?.points || [], isExposure = field === 'exposure';
+    const host = $(id), points = data?.history?.points || [], isExposure = field !== 'pnl', isDollar = field === 'net_exposure';
     if (!points.length) {host.innerHTML = '<div class="empty">等待有效历史采样</div>'; return;}
     const selected = rows(), width = Math.max(250, host.clientWidth), height = host.clientHeight || 280;
     const left = isExposure ? 52 : 62, right = width - 15, top = 22, bottom = height - 31;
-    const threshold = isExposure && state.strategy !== 'all' && M.finite(selected[0]?.hedge_tolerance_percent) ? Number(selected[0].hedge_tolerance_percent) : null;
+    const threshold = isExposure && isDollar ? Number(selected[0]?.hedge_threshold_usdc) : isExposure && state.strategy !== 'all' && M.finite(selected[0]?.hedge_tolerance_percent) ? Number(selected[0].hedge_tolerance_percent) : null;
     const get = (point, name) => historyValue(data.history, point, name, field);
     const values = points.flatMap(p => selected.map(r => get(p, r.name)));
-    const [lo, hi] = isExposure ? exposureDomain(values, threshold) : M.domain(values, true);
+    const [lo, hi] = isDollar ? dollarExposureDomain(values, threshold) : isExposure ? exposureDomain(values, threshold) : M.domain(values, true);
     const first = Number(points[0].ts), last = Number(points.at(-1).ts);
     const x = ts => first === last ? (left + right) / 2 : left + (ts - first) / (last - first) * (right - left);
     const y = value => bottom - (value - lo) / (hi - lo) * (bottom - top);
     let content = `<svg viewBox="0 0 ${width} ${height}" role="img" aria-label="${E(host.getAttribute('aria-label'))}"><title>${E(host.getAttribute('aria-label'))}，${M.date(first)} 至 ${M.date(last)}；完整采样值见下方滑块。</title>`;
     for (let i = 0; i < 5; i++) {
       const value = lo + (hi - lo) * i / 4;
-      content += `<line class="gridline" x1="${left}" x2="${right}" y1="${y(value)}" y2="${y(value)}"/><text x="${left - 8}" y="${y(value) + 4}" text-anchor="end">${isExposure ? percent(value, hi <= 10 ? 1 : 0) : M.number(value, hi - lo < 2 ? 2 : 0)}</text>`;
+      content += `<line class="gridline" x1="${left}" x2="${right}" y1="${y(value)}" y2="${y(value)}"/><text x="${left - 8}" y="${y(value) + 4}" text-anchor="end">${isExposure && !isDollar ? percent(value, hi <= 10 ? 1 : 0) : M.number(value, hi - lo < 2 ? 2 : 0)}</text>`;
     }
     if (lo <= 0 && hi >= 0) content += `<line class="zero" x1="${left}" x2="${right}" y1="${y(0)}" y2="${y(0)}"/>`;
     if (threshold !== null) {
       for (const value of threshold === 0 ? [0] : [-threshold, threshold]) content += `<line class="threshold" x1="${left}" x2="${right}" y1="${y(value)}" y2="${y(value)}"/>`;
-      content += `<text x="${right}" y="${Math.max(12, y(threshold) - 6)}" text-anchor="end">容忍 ${threshold ? '±' : ''}${percent(threshold, 0)}</text>`;
+      content += `<text x="${right}" y="${Math.max(12, y(threshold) - 6)}" text-anchor="end">阈值 ${threshold ? '±' : ''}${isDollar ? M.number(threshold,0) + ' USDC' : percent(threshold, 0)}</text>`;
     }
     selected.forEach(r => {
       const e = encoding(r), accessor = p => get(p, r.name);
@@ -179,13 +202,16 @@
     document.querySelectorAll('[data-range]').forEach(b => b.setAttribute('aria-pressed', b.dataset.range === state.range));
     const legend = rows().map(r => `<span class="${cls(r)}"><i class="key" aria-hidden="true"></i>${E(label(r))}</span>`).join('');
     $('pnl-legend').innerHTML = legend; $('exposure-legend').innerHTML = legend;
-    $('threshold-note').textContent = state.strategy === 'all' ? '净敞口 ÷ 总敞口 · 选中账户查看正负阈值' : `实际两腿名义金额 · 正值净多 / 负值净空 · 容忍 ${percent(rows()[0]?.hedge_tolerance_percent, 0)}`;
-    drawChart('pnl-chart', 'pnl'); drawChart('exposure-chart', 'exposure');
+    const dollars = dollarHedge(allRows()[0]), exposureField = dollars ? 'net_exposure' : 'exposure';
+    $('exposure-title').textContent = dollars ? '有向净敞口 / USDC' : '有向美元敞口率 / %';
+    $('exposure-chart').setAttribute('aria-label', dollars ? '实际两腿有向净敞口金额曲线，单位USDC' : '实际两腿有向美元敞口率曲线，单位百分比');
+    $('threshold-note').textContent = dollars ? `净多为正，净空为负 · 超过 ±${hedgeLimit(allRows()[0])} 触发 · 调回半阈值` : state.strategy === 'all' ? '净敞口 ÷ 总敞口 · 选中账户查看正负阈值' : `实际两腿名义金额 · 正值净多 / 负值净空 · 容忍 ${hedgeLimit(rows()[0])}`;
+    drawChart('pnl-chart', 'pnl'); drawChart('exposure-chart', exposureField);
     const points = data?.history?.points || [], at = sampleIndex(points, selectedTs), sample = points[at];
     $('sample').max = Math.max(0, points.length - 1); $('sample').value = Math.max(0, at); $('sample').disabled = !points.length;
     $('latest-sample').disabled = !points.length || selectedTs === null;
     $('sample-time').textContent = sample ? M.date(sample.ts) : '—';
-    $('sample-values').innerHTML = sample ? rows().map(r => `<span class="${cls(r)}">${E(label(r))}：${M.signed(historyValue(data.history, sample, r.name, 'pnl'), 2)} USDC · 敞口 ${percent(historyValue(data.history, sample, r.name, 'exposure'))}</span>`).join('') : '';
+    $('sample-values').innerHTML = sample ? rows().map(r => `<span class="${cls(r)}">${E(label(r))}：${M.signed(historyValue(data.history, sample, r.name, 'pnl'), 2)} USDC · 敞口 ${dollars ? M.signed(historyValue(data.history, sample, r.name, exposureField),2) + ' USDC' : percent(historyValue(data.history, sample, r.name, exposureField))}</span>`).join('') : '';
     const ranges = {'1h':'1 小时','24h':'24 小时','7d':'7 天'}, shownRange = data?.history?.range || state.range;
     $('history-note').textContent = points.length ? `窗口 ${ranges[shownRange] || shownRange} · 原始 ${M.number(data.history.source_count, 0)} 点 / 显示 ${points.length} 点 · 行情缺口断线显示 · 用滑块、方向键或轻触查看采样。${shownRange !== state.range ? '所选窗口正在加载，保留上次成功窗口。' : ''}` : '曲线范围只影响历史展示，不重置累计收益或成交统计。';
   }
@@ -215,7 +241,11 @@
     $('pagination').hidden = true;
     if (state.view === 'parameters') {
       const p = data?.summary?.parameters || {};
-      const values = [['交易模式','仅模拟，不提交真实订单'],['账户组合',`${allRows().length} 个独立账户`],['QQQ 网格',`LONG ONLY · ${M.number(p.grid_count, 0)} 格`],['每格名义金额',`${M.number(p.order_notional_usdc, 0)} USDC`],['网格间距',[...new Set(allRows().map(r => r.grid_step_percent + '%'))].join(' / ')],['对冲容忍度',[...new Set(allRows().map(r => r.hedge_tolerance_percent + '%'))].join(' / ')],['对冲标的','Variational US100 空头'],['对冲目标',`美元名义金额 β = ${M.number(p.beta, 2)}`],['QQQ / US100 手续费',`${M.number(p.lighter_fee_bps, 2)} / ${M.number(p.var_fee_bps, 2)} bps`],['US100 额外滑点',`${M.number(p.var_slippage_bps, 2)} bps`],['对冲次数',rows().map(r => label(r) + '：' + M.number(r.hedge_adjustments, 0)).join(' / ')],['实际敞口','|净敞口| ÷ 两腿总敞口'],['QQQ 成交模型','公共成交 + 保守 Maker 队列'],['US100 成交模型','指示性买卖报价'],['资金费、隔夜费与股息调整','未计入损益']];
+      const values = [['交易模式','仅模拟，不提交真实订单'],['账户组合',`${allRows().length} 个独立账户`],['QQQ 网格',`LONG ONLY · ${M.number(p.grid_count, 0)} 格`],['每格名义金额',`${M.number(p.order_notional_usdc, 0)} USDC`],['网格间距',[...new Set(allRows().map(r => r.grid_step_percent + '%'))].join(' / ')],['对冲阈值',[...new Set(allRows().map(hedgeLimit))].join(' / ')],['对冲标的','Variational US100 空头'],['对冲目标',`美元名义金额 β = ${M.number(p.beta, 2)}`],['QQQ / US100 手续费',`${M.number(p.lighter_fee_bps, 2)} / ${M.number(p.var_fee_bps, 2)} bps`],['US100 额外滑点',`${M.number(p.var_slippage_bps, 2)} bps`],['对冲次数',rows().map(r => label(r) + '：' + M.number(r.hedge_adjustments, 0)).join(' / ')],['阈值口径',dollarHedge(allRows()[0]) ? '两腿净名义金额绝对值 / USDC' : '|净敞口| ÷ 两腿总敞口'],['QQQ 成交模型','公共成交 + 保守 Maker 队列'],['US100 成交模型','指示性买卖报价'],['资金费、隔夜费与股息调整','未计入损益']];
+      if (data.summary?.pricing) {
+        const pricing = data.summary.pricing;
+        values.push(['半点差',pricing.half_spread_percent == null ? '使用源买卖价' : percent(pricing.half_spread_percent,4)],['US100 报价模式','各组共享参考价估算 · 未按每笔数量单独询价'],['直接复用 / 失败兜底',`${pricing.refresh_after_seconds} 秒内复用，超时先刷新；失败最多用 ${pricing.max_age_seconds} 秒旧价`],['当前报价口径起始',M.date(Date.parse(data.summary.pricing_since_utc) / 1000)],['参考估价 / 其中缓存成交',rows().map(r => `${label(r)}：${M.number(r.pricing_stats?.reference_price_fills,0)} / ${M.number(r.pricing_stats?.cached_price_fills,0)}`).join('；')]);
+      }
       $('detail-content').innerHTML = `<dl class="parameters">${values.map(([k,v]) => `<div class="parameter"><dt>${E(k)}</dt><dd>${E(v)}</dd></div>`).join('')}</dl>`;
       $('detail-note').textContent = '两腿总敞口为各腿实际名义金额绝对值之和。持仓、挂单和待对冲状态来自同一份已发布采样。';
       return;
@@ -225,10 +255,10 @@
     $('detail-note').textContent = trades ? '显示服务端发布的近期成交；导出遵循当前账户筛选，时间为北京时间。每条记录都是模拟成交。' : '此处为 QQQ 网格分格持仓；US100 对冲净仓位见上方两腿账本。';
     if (!data?.details_available) {$('detail-content').innerHTML = '<div class="empty">仓位与成交明细暂不可用</div>'; return;}
     if (!values.length) {$('detail-content').innerHTML = `<div class="empty">${trades ? '当前账户筛选下暂无模拟成交' : '当前账户筛选下暂无 QQQ 网格持仓'}</div>`; return;}
-    const headers = trades ? ['账户','时间 / 北京时间','场所 / 标的','方向','成交数量','成交价','成交额 / USDC','手续费 / USDC','原因'] : ['账户','网格编号','QQQ 数量','入场价格','止盈价格'];
+    const headers = trades ? ['账户','时间 / 北京时间','场所 / 标的','方向','成交数量','成交价','成交额 / USDC','手续费 / USDC','原因','价格来源'] : ['账户','网格编号','QQQ 数量','入场价格','止盈价格'];
     $('detail-content').innerHTML = table(headers, values.slice(page * size, (page + 1) * size).map(value => {
       const row = allRows().find(r => r.name === value.scenario);
-      const items = trades ? [E(rowLabel(value.scenario)),M.date(value.ts),E(`${value.venue || '—'} / ${value.symbol || '—'}`),E(({buy:'买入',sell:'卖出',BUY:'买入',SELL:'卖出'}[value.side] || value.side || '—')),M.number(value.qty,6),M.number(value.price,4),M.number(value.notional,2),M.number(value.fee,4),E(reason(value.reason))] : [E(rowLabel(value.scenario)),E(value.slot),M.number(value.qty,6),M.number(value.entry_price,4),M.number(value.tp_price,4)];
+      const items = trades ? [E(rowLabel(value.scenario)),M.date(value.ts),E(`${value.venue || '—'} / ${value.symbol || '—'}`),E(({buy:'买入',sell:'卖出',BUY:'买入',SELL:'卖出'}[value.side] || value.side || '—')),M.number(value.qty,6),M.number(value.price,4),M.number(value.notional,2),M.number(value.fee,4),E(reason(value.reason)),E(fillPricing(value))] : [E(rowLabel(value.scenario)),E(value.slot),M.number(value.qty,6),M.number(value.entry_price,4),M.number(value.tp_price,4)];
       return `<tr>${cells(headers,items,row)}</tr>`;
     }).join(''));
     $('pagination').hidden = false; $('previous').disabled = page === 0; $('next').disabled = (page + 1) * size >= values.length;
@@ -294,7 +324,7 @@
     setState({view:tabs[next].dataset.view}); tabs[next].focus();
   });
   $('export').onclick = () => {
-    const values = [['账户','成交编号','北京时间','场所','标的','方向','数量','成交价USDC','手续费USDC','成交额USDC','原因'],...filtered(data?.trades).map(r => [r.scenario,r.id,M.date(r.ts,false,true),r.venue,r.symbol,r.side,r.qty,r.price,r.fee,r.notional,reason(r.reason)])];
+    const values = [['账户','成交编号','北京时间','场所','标的','方向','数量','成交价USDC','手续费USDC','成交额USDC','原因','价格来源','源报价时间','源报价数量','报价年龄秒','半点差百分比','源买价','源卖价'],...filtered(data?.trades).map(r => [r.scenario,r.id,M.date(r.ts,false,true),r.venue,r.symbol,r.side,r.qty,r.price,r.fee,r.notional,reason(r.reason),fillPricing(r),M.finite(r.quote_ts) ? M.date(r.quote_ts,false,true) : '',r.source_qty ?? '',r.quote_age_seconds ?? '',r.half_spread_percent ?? '',r.source_bid ?? '',r.source_ask ?? ''])];
     const url = URL.createObjectURL(new Blob([M.csv(values)], {type:'text/csv;charset=utf-8'}));
     const link = document.createElement('a'); link.href = url; link.download = `qqq-hedge-trades-${state.strategy}-${Date.now()}.csv`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
   };

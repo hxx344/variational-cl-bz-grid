@@ -63,14 +63,21 @@ class QQQConfig:
     settings: QQQSettings
     name: str
     grid_step_percent: str
-    hedge_tolerance_percent: str
+    hedge_tolerance_percent: str | None
     state_file: str
+    hedge_threshold_usdc: str | None = None
+    half_spread_percent: str | None = None
 
     def strategy_identity(self):
-        return encoded({"model_version": 1, "settings": asdict(self.settings), "name": self.name,
+        identity = {"model_version": 1, "settings": asdict(self.settings), "name": self.name,
                         "grid_step_percent": self.grid_step_percent, "hedge_tolerance_percent": self.hedge_tolerance_percent,
                         "mapping": {"lighter": "QQQ", "var": "US100S", "multipliers": "1"},
-                        "pnl_basis": "before_funding_and_dividends"})
+                        "pnl_basis": "before_funding_and_dividends"}
+        if self.hedge_threshold_usdc is not None:
+            identity["hedge_threshold_usdc"] = self.hedge_threshold_usdc
+        if self.half_spread_percent is not None:
+            identity["half_spread_percent"] = self.half_spread_percent
+        return encoded(identity)
 
 
 def initial_account():
@@ -154,6 +161,15 @@ def hedge_target(account, qqq_mark, var_mark, config, size_step):
     """Solve net/gross = signed half-band, adjusting only the US100 leg."""
     net, gross, ratio = exposure(account, qqq_mark, var_mark, config.settings.beta)
     old, step = dec(account["us100"]["qty"]), dec(size_step)
+    if config.hedge_threshold_usdc is not None:
+        threshold = dec(config.hedge_threshold_usdc)
+        if abs(net) <= threshold:
+            return old
+        target_net = (1 if net > 0 else -1) * threshold * dec(config.settings.hedge_reset_fraction)
+        a = dec(account["qqq"]["qty"]) * dec(qqq_mark) * dec(config.settings.beta)
+        ideal = (target_net - a) / dec(var_mark)
+        candidates = {floor(ideal, step), floor(ideal, step) + step}
+        return min(candidates, key=lambda qty: (abs(a + qty * dec(var_mark) - target_net), abs(qty - old)))
     threshold = dec(config.hedge_tolerance_percent) / 100
     if not gross or abs(ratio) <= threshold:
         return old
@@ -312,15 +328,27 @@ class QQQEngine:
                 else:
                     price = dec(quote["ask" if change > 0 else "bid"])
                     price *= 1 + (1 if change > 0 else -1) * dec(settings.var_slippage_bps) / 10000
-                    fills.append(book_fill(account, "us100", change, price, settings.var_fee_bps,
-                                           quote["ts"], "delta_hedge"))
+                    shared = "pricing_policy" in frame.market
+                    fill = book_fill(account, "us100", change, price, settings.var_fee_bps,
+                                     frame.ts if shared else quote["ts"], "delta_hedge")
+                    if shared:
+                        age = max(0, frame.ts - quote["ts"])
+                        fill.update(pricing_mode=quote["pricing_mode"], quote_ts=quote["ts"], source_qty=quote["source_qty"],
+                                    quote_age_seconds=age, cache_used=quote["cache_used"],
+                                    half_spread_percent=frame.market["pricing_policy"].get("half_spread_percent"),
+                                    source_bid=quote["source_bid"], source_ask=quote["source_ask"])
+                        account["reference_price_fills"] = account.get("reference_price_fills", 0) + 1
+                        account["cached_price_fills"] = account.get("cached_price_fills", 0) + int(quote["cache_used"])
+                        account["max_reference_age_seconds"] = max(account.get("max_reference_age_seconds", 0), age)
+                    fills.append(fill)
                     account["hedge_adjustments"] += 1
                     reason = "hedged"
         else:
             pending, reason = True, "var_market_unavailable"
         vmark = dec(account["last_var_mark"] or "0")
         net, gross, ratio = exposure(account, qmark, vmark, settings.beta)
-        if abs(ratio) > dec(self.config.hedge_tolerance_percent) / 100:
+        outside_band = abs(net) > dec(self.config.hedge_threshold_usdc) if self.config.hedge_threshold_usdc is not None else abs(ratio) > dec(self.config.hedge_tolerance_percent) / 100
+        if outside_band:
             pending = True
             if reason in {"hedged", "inside_band"}:
                 reason = "quantity_rounding_residual"
@@ -346,6 +374,10 @@ class QQQEngine:
                     "open_slots": sum(dec(s["qty"]) > 0 for s in account["slots"]), "resting_orders": len(account["orders"]),
                     "max_drawdown_usdc": account["max_drawdown_usdc"], "gap_count": account["gap_count"],
                     "var_valued_at": account["last_var_ts"], "anchor": account["anchor"]}
+        if self.config.hedge_threshold_usdc is not None:
+            snapshot["hedge_threshold_usdc"] = self.config.hedge_threshold_usdc
+        if "pricing_policy" in frame.market:
+            snapshot["pricing_stats"] = {key: account.get(key, 0) for key in ("reference_price_fills", "cached_price_fills", "max_reference_age_seconds")}
         return account, fills, snapshot
 
     def apply(self, frame, plan):

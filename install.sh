@@ -17,7 +17,7 @@ Earlier seven-day centers migrate to three days with separate preserved ledgers.
 Unchanged dependencies, validated code and running services are reused.
   --compare  Start the three-grid comparison (also switches existing installs).
   --inventory  Start the five-scenario inventory comparison with its own ledgers.
-  --qqq-hedge  Start the nine-scenario Lighter QQQ / Variational US100 paper comparison.
+  --qqq-hedge  Start the three-scenario Lighter QQQ / Variational US100 paper comparison.
   --single   Start one grid using config.json.
   --cleanup  Reclaim obsolete deployments without downloading or restarting.
   --help     Show this help without installing anything.
@@ -438,7 +438,7 @@ import json, sys
 from pathlib import Path
 data = json.loads(Path(sys.argv[1]).read_text())
 data['base_config'] = '/etc/variational-grid/config.json'
-data['output_dir'] = '/var/lib/variational-grid/qqq-hedge'
+data['output_dir'] = '/var/lib/variational-grid/qqq-hedge-usd3000-hs0015-v1'
 Path(sys.argv[2]).write_text(json.dumps(data, indent=2) + '\n')
 PY
   chmod 644 "$conf/qqq-hedge.json"
@@ -481,7 +481,16 @@ for value in (() if sys.argv[1] == 'qqq-hedge' else (config.session_file, config
 PY
 )
 if [[ $mode == qqq-hedge ]]; then
-  echo 'QQQ / US100 public quantity-specific indicative quotes selected; no login session is required.'
+  (cd "$release" && python3 - <<'PY'
+from variational_grid.qqq_migration import upgrade_qqq_defaults
+backup = upgrade_qqq_defaults('/etc/variational-grid/qqq-hedge.json')
+if backup:
+    print(f'Updated to three grids, 3000 USDC hedge threshold, 0.0015% half spread; old configuration: {backup}; old ledgers preserved.')
+else:
+    print('QQQ settings unchanged; skipping migration.')
+PY
+  )
+  echo 'QQQ / US100 public paper pricing selected; persisted shared reference quotes are enabled by default; no login session is required.'
 elif ! (cd "$release" && runuser -u "$account" -- python3 -m variational_grid check-session --config "$conf/$config_name"); then
   echo 'A valid login session is needed for quantity-specific indicative quotes; public candles and statistics do not require one.'
   echo 'Paste only the vr-token cookie when prompted (input is hidden). No wallet private key is needed.'
