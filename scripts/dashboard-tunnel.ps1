@@ -26,7 +26,7 @@ $delay = $RetrySeconds
 
 Write-Host "Dashboard: http://127.0.0.1:$LocalPort/ -> server 127.0.0.1:9876"
 Write-Host 'Keep this window open. Ctrl+C stops the tunnel and retries.'
-Write-Host 'Authentication stays with OpenSSH; password login may prompt again on reconnect.'
+Write-Host 'Authentication stays with OpenSSH; password, MFA or QR login may require you again on reconnect.'
 
 while ($true) {
     # Check without connecting to, closing or replacing another tunnel.

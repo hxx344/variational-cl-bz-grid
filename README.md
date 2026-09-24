@@ -400,4 +400,4 @@ python -m variational_grid compare-reset --experiments qqq-hedge.example.json --
 $tunnelScript = Join-Path $env:TEMP 'variational-dashboard-tunnel.ps1'; Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/hxx344/variational-cl-bz-grid/main/scripts/dashboard-tunnel.ps1' -OutFile $tunnelScript; powershell.exe -NoProfile -ExecutionPolicy Bypass -File $tunnelScript -SshHost USER@SERVER_IP -LocalPort 9876
 ```
 
-已有本地仓库也可直接运行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\dashboard-tunnel.ps1 -SshHost USER@SERVER_IP -LocalPort 9876`。SSH 别名、认证方式和服务器端口沿用用户已有 SSH 配置；特殊 SSH 端口可加 `-SshPort 2222`。不修改全局执行策略或 SSH 配置，不保存密码或私钥，不关闭主机指纹检查。密码登录在每次重连时可能需要重新输入；密钥或 ssh-agent 登录可自动完成。保留窗口，Ctrl+C 停止脚本；此本机改动无需重新部署服务器。
+已有本地仓库也可直接运行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\dashboard-tunnel.ps1 -SshHost USER@SERVER_IP -LocalPort 9876`。SSH 别名、认证方式和服务器端口沿用用户已有 SSH 配置；特殊 SSH 端口可加 `-SshPort 2222`。不修改全局执行策略或 SSH 配置，不保存密码或私钥，不关闭主机指纹检查。密码、MFA 或腾讯云微信扫码登录在重连时可能需要再次操作；只有服务器允许密钥或 ssh-agent 无交互认证时，才能完整自动恢复，脚本不会绕过登录要求。保留窗口，Ctrl+C 停止脚本；此本机改动无需重新部署服务器。
