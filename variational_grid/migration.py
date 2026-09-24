@@ -19,7 +19,7 @@ def upgrade_experiment(path):
     names = {r.get("name") for r in rows}
     old_output = Path(data["output_dir"])
     # This version already applied; preserve subsequent user edits on repeated installs.
-    if old_output.name.endswith("-range30"):
+    if old_output.name.endswith(("-range30", "-range30-center3d")):
         return None
     absolute = names == set(LEGACY)
     if len(rows) != 3 or not (absolute or names == set(PERCENT)):
@@ -62,6 +62,48 @@ def upgrade_experiment(path):
         # A migration must start a new comparison, never inherit unknown existing data.
         if proposed.output.exists() and any(proposed.output.iterdir()):
             raise GridError("New percentage experiment directory is not empty; existing data left untouched")
+        if not backup.exists():
+            with backup.open("xb") as stream:
+                stream.write(original)
+                stream.flush()
+                os.fsync(stream.fileno())
+            backup.chmod(path.stat().st_mode & 0o777)
+        temporary.chmod(path.stat().st_mode & 0o777)
+        os.replace(temporary, path)
+        return backup
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def upgrade_center(path, *, comparison=True):
+    """Version old center settings into a separate run, leaving all old files intact."""
+    from .cli import configuration
+    path = Path(path).resolve()
+    original = path.read_bytes()
+    data = json.loads(original.decode("utf-8-sig"))
+    current = Experiment.load(path) if comparison else configuration(path)
+    if current.center_hours == 72:
+        return None
+    data["center_hours"] = 72
+    key = "output_dir" if comparison else "state_file"
+    old = Path(data[key])
+    new = old.with_name(old.name + "-center3d") if comparison else old.with_name(old.stem + "-center3d" + old.suffix)
+    target = (path.parent / new).resolve()
+    if target.exists():
+        raise GridError("Three-day target already exists; old data and configuration preserved")
+    data[key] = str(new)
+    backup = path.with_name(path.stem + ".before-center3d" + path.suffix)
+    if backup.exists() and backup.read_bytes() != original:
+        raise GridError("Three-day backup already contains different settings")
+    handle, temporary = tempfile.mkstemp(prefix=".center-upgrade-", suffix=".json", dir=path.parent)
+    temporary = Path(temporary)
+    try:
+        with os.fdopen(handle, "w", encoding="utf-8") as stream:
+            json.dump(data, stream, indent=2)
+            stream.write("\n")
+            stream.flush()
+            os.fsync(stream.fileno())
+        (Experiment.load if comparison else configuration)(temporary)
         if not backup.exists():
             with backup.open("xb") as stream:
                 stream.write(original)

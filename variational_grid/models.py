@@ -6,7 +6,7 @@ from pathlib import Path
 
 D = Decimal
 HOUR = 3600
-WINDOW = 168
+WINDOW = 72
 
 
 class GridError(Exception):
@@ -40,6 +40,7 @@ def timestamp(value):
 @dataclass(frozen=True)
 class Config:
     mode: str = "paper"
+    center_hours: int = WINDOW
     paper_balance_usdc: str = "1000"
     quantity_barrels: str = "1"
     grid_step_usdc_per_barrel: str = "0.20"
@@ -72,12 +73,14 @@ class Config:
         for name in ("fee_bps_per_leg", "slippage_bps_per_leg"):
             if not D("0") <= dec(getattr(self, name)) < D("1000"):
                 raise GridError(f"{name} must be in [0, 1000)")
-        for name in ("max_levels", "max_holding_hours", "poll_seconds", "max_quote_age_seconds", "max_pair_skew_seconds"):
+        for name in ("center_hours", "max_levels", "max_holding_hours", "poll_seconds", "max_quote_age_seconds", "max_pair_skew_seconds"):
             value = getattr(self, name)
             if type(value) is not int or value <= 0:
                 raise GridError(f"{name} must be a positive integer")
         if self.max_levels > 100 or self.poll_seconds < 5:
             raise GridError("max_levels must be <= 100 and poll_seconds >= 5")
+        if self.center_hours not in (72, 168):
+            raise GridError("center_hours must be 72 (3 days) or 168 (legacy 7 days)")
         if not isinstance(self.session_file, str) or not isinstance(self.state_file, str) or not self.session_file.strip() or not self.state_file.strip():
             raise GridError("File paths must be non-empty strings")
         return self
@@ -86,6 +89,7 @@ class Config:
     def load(cls, path):
         try:
             data = json.loads(Path(path).read_text(encoding="utf-8-sig"))
+            data.setdefault("center_hours", 168)  # Unversioned files describe the old strategy.
             return cls(**data).validate()
         except (OSError, ValueError, TypeError):
             raise GridError("Cannot read configuration, or configuration contains unknown fields") from None
@@ -93,6 +97,8 @@ class Config:
     def strategy_identity(self):
         # Changing economics while a ledger is open must never silently reinterpret it.
         data = asdict(self)
+        if self.center_hours == 168:
+            data.pop("center_hours")  # Preserve the exact legacy ledger identity.
         if self.grid_step_percent is None:
             data.pop("grid_step_percent")
         else:
@@ -153,11 +159,13 @@ def validate_pair(cl, bz, now, config):
         raise GridError("CL/BZ quote timestamps are too far apart")
 
 
-def rolling_center(cl_rows, bz_rows, hour_end):
-    """Exactly 168 aligned, CLOSED hourly candles in [end-7d, end). No fills."""
+def rolling_center(cl_rows, bz_rows, hour_end, hours=WINDOW):
+    """Exactly the configured number of aligned, CLOSED hourly candles. No fills."""
+    if type(hours) is not int or hours not in (72, 168):
+        raise GridError("Invalid center window")
     if hour_end % HOUR:
         raise GridError("History endpoint must be an exact UTC hour")
-    start = hour_end - WINDOW * HOUR
+    start = hour_end - hours * HOUR
     expected = set(range(start, hour_end, HOUR))
     def parse(rows):
         values = {}
@@ -178,7 +186,7 @@ def rolling_center(cl_rows, bz_rows, hour_end):
         except (KeyError, TypeError):
             raise GridError("Candle response schema changed") from None
         if set(values) != expected:
-            raise GridError(f"Incomplete 7-day history: {len(values)}/{WINDOW} aligned hours")
+            raise GridError(f"Incomplete {hours // 24}-day history: {len(values)}/{hours} aligned hours")
         return values
     cl, bz = parse(cl_rows), parse(bz_rows)
-    return sum((bz[t] - cl[t] for t in sorted(expected)), D(0)) / WINDOW
+    return sum((bz[t] - cl[t] for t in sorted(expected)), D(0)) / hours

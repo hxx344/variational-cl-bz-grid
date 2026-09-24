@@ -31,14 +31,14 @@ class HistoryTests(unittest.TestCase):
     end = 1735689600
 
     def rows(self, symbol):
-        # Vary both series. Mean of paired spread must equal 7 + 83.5 / 100.
-        return [{"unix_time_ms": (self.end - (168 - i) * HOUR) * 1000,
-                 "close": str(D(95) + D(i) / 10 + (D(7) + D(i) / 100 if symbol == "BZ" else 0))} for i in range(168)]
+        # Vary both series. Mean of paired spread must equal 7 + 35.5 / 100.
+        return [{"unix_time_ms": (self.end - (WINDOW - i) * HOUR) * 1000,
+                 "close": str(D(95) + D(i) / 10 + (D(7) + D(i) / 100 if symbol == "BZ" else 0))} for i in range(WINDOW)]
 
     def test_exact_aligned_mean_ignores_open_candle(self):
         cl, bz = self.rows("CL"), self.rows("BZ")
         bz.append({"unix_time_ms": self.end * 1000, "close": "99999"})
-        self.assertEqual(rolling_center(list(reversed(cl)), bz, self.end), D("7.835"))
+        self.assertEqual(rolling_center(list(reversed(cl)), bz, self.end), D("7.355"))
 
     def test_missing_duplicate_nan_misaligned_fail(self):
         for operation in (lambda r: r.pop(10), lambda r: r.append(r[1]),

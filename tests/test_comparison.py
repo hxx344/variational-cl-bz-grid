@@ -154,9 +154,9 @@ class ComparisonTests(unittest.TestCase):
         class FakeClient:
             def __init__(self):
                 self.calls = []
-            def candles(self, symbol, hour):
+            def candles(self, symbol, hour, hours=72):
                 self.calls.append(("candles", symbol))
-                return [{"unix_time_ms": t*1000, "close": "95" if symbol=="CL" else "102"} for t in range(hour-168*HOUR,hour,HOUR)]
+                return [{"unix_time_ms": t*1000, "close": "95" if symbol=="CL" else "102"} for t in range(hour-hours*HOUR,hour,HOUR)]
             def market(self, symbol):
                 return True, False
             def quote(self, symbol, qty):

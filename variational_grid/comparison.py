@@ -10,7 +10,7 @@ import time
 
 from .client import Client
 from .engine import Engine
-from .models import Config, D, GridError, HOUR, WINDOW, Quote, dec, rolling_center, utc, validate_pair
+from .models import Config, D, GridError, HOUR, Quote, dec, rolling_center, utc, validate_pair
 from .store import ProcessLock, Store
 
 OVERRIDES = {
@@ -36,7 +36,7 @@ class Experiment:
         path = Path(path).resolve()
         try:
             data = json.loads(path.read_text(encoding="utf-8-sig"))
-            if set(data) != {"base_config", "output_dir", "scenarios"}:
+            if set(data) - {"base_config", "output_dir", "scenarios", "center_hours"} or not {"base_config", "output_dir", "scenarios"} <= set(data):
                 raise ValueError()
             base = configuration(path.parent / data["base_config"])
             output = (path.parent / data["output_dir"]).resolve()
@@ -54,7 +54,7 @@ class Experiment:
                 # Explicit legacy absolute overrides also work with a percentage base config.
                 if "grid_step_usdc_per_barrel" in overrides and "grid_step_percent" not in overrides:
                     overrides["grid_step_percent"] = None
-                scenarios[name] = replace(base, **overrides, state_file=str(state)).validate()
+                scenarios[name] = replace(base, **overrides, center_hours=data.get("center_hours", base.center_hours), state_file=str(state)).validate()
             if any(p.is_relative_to(output) for p in (path, Path(base.session_file), Path(base.state_file), (path.parent / data["base_config"]).resolve())):
                 raise GridError("Experiment output must be separate from existing configuration, session and single-run ledger")
             return cls(base, output, scenarios)
@@ -65,6 +65,10 @@ class Experiment:
         return {"version": 1, "max_quote_age_seconds": self.base.max_quote_age_seconds,
                 "max_pair_skew_seconds": self.base.max_pair_skew_seconds,
                 "scenarios": {name: json.loads(c.strategy_identity()) for name, c in self.scenarios.items()}}
+
+    @property
+    def center_hours(self):
+        return next(iter(self.scenarios.values())).center_hours
 
 
 @dataclass
@@ -109,8 +113,8 @@ class MarketFeed:
         from .cli import paired
         hour = int(time.time()) // HOUR * HOUR
         if self.hour != hour:
-            rows = paired(lambda symbol: self.client.candles(symbol, hour))
-            self.center = rolling_center(*rows, hour)
+            rows = paired(lambda symbol: self.client.candles(symbol, hour, self.experiment.center_hours))
+            self.center = rolling_center(*rows, hour, self.experiment.center_hours)
             self.hour = hour
         markets = paired(self.client.market)
         if not all(opened for opened, _ in markets):
@@ -160,6 +164,9 @@ class Cohort:
                 self.stack.callback(store.close)
                 self.stores[name] = store
                 self.engines[name] = Engine(config, store)
+            from .reset import initialize, process_reset
+            initialize(self.experiment)
+            process_reset(self)
             self.recover()
             self.set_runtime("running")
             return self
@@ -246,8 +253,8 @@ class Cohort:
         result = {"mode": "paper_comparison", "ts": frame.ts, "time_utc": utc(frame.ts),
                   "started_utc": utc(frame.ts) if previous is None else previous["started_utc"],
                   "sample_count": 1 if previous is None else previous["sample_count"] + 1,
-                  "history_start_utc": utc(frame.hour_end - WINDOW * HOUR), "history_end_utc": utc(frame.hour_end),
-                  "center_7d": str(frame.center), "poll_seconds": self.experiment.base.poll_seconds,
+                  "history_start_utc": utc(frame.hour_end - self.experiment.center_hours * HOUR), "history_end_utc": utc(frame.hour_end),
+                  "center": str(frame.center), "center_window_hours": self.experiment.center_hours, "poll_seconds": self.experiment.base.poll_seconds,
                   "pnl_basis": "before_funding", "scenarios": rows}
         with self.db:
             self.db.execute("INSERT INTO summaries VALUES (?,?)", (frame.ts, json.dumps(result)))
@@ -284,6 +291,9 @@ def run_comparison(args):
                 return 0
             started = time.monotonic()
             try:
+                from .reset import process_reset
+                if process_reset(cohort):
+                    feed.hour = None
                 frame = feed.next()
             except GridError as error:
                 failures += 1
@@ -300,6 +310,9 @@ def run_comparison(args):
             delay = experiment.base.poll_seconds if not failures else min(60, experiment.base.poll_seconds * 2 ** min(failures, 3))
             deadline = time.monotonic() + max(0, delay - (time.monotonic() - started))
             while time.monotonic() < deadline and not stop.exists():
+                from .reset import read_state
+                if read_state(experiment)["status"] in {"pending", "archiving", "clearing"}:
+                    break
                 time.sleep(min(1, max(0, deadline - time.monotonic())))
 
 

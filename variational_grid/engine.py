@@ -127,15 +127,16 @@ class Engine:
             fees = dec(self.store.get("fees"))
             realized = dec(self.store.get("realized"))
             snapshot = {
-                "mode": "paper", "time_utc": utc(now), "center_7d": str(center), "spread_bz_minus_cl": str(spread),
+                "mode": "paper", "time_utc": utc(now), "center": str(center), "center_window_hours": self.config.center_hours, "spread_bz_minus_cl": str(spread),
                 "cl_mark": str(cl.mark), "bz_mark": str(bz.mark), "deviation": str(deviation),
                 "grid_step": str(step), "grid_step_percent": self.config.grid_step_percent,
-                "grid_step_basis": "center_7d_absolute" if self.config.grid_step_percent is not None else "absolute",
+                "grid_step_basis": "center_absolute" if self.config.grid_step_percent is not None else "absolute",
                 **self.config.grid_geometry(center),
                 "equity_usdc": str(equity), "cash_usdc": self.store.get("cash"), "realized_pnl_usdc": str(realized),
                 "total_pnl_usdc": str(equity - dec(self.config.paper_balance_usdc)), "fees_usdc": str(fees),
                 "pnl_basis": "before_funding", "open_pairs": len(lots), "cl_barrels": str(-position_bz), "bz_barrels": str(position_bz),
                 "margin_usdc": str(margin_one * len(lots)), "drawdown_fraction": str((peak - equity) / peak),
+                **self.position_limits(equity, margin_one * len(lots)),
                 "halted": self.store.get("halted") or None, "open_allowed": allow_open,
                 "skip_reason": skip_reason, "actions": actions, **self.store.volume(),
             }
@@ -143,3 +144,9 @@ class Engine:
             # Bound routine telemetry to seven days; keep every fill, lot and event.
             self.store.db.execute("DELETE FROM ticks WHERE ts < ?", (now - 7 * 24 * HOUR,))
             return snapshot
+
+    def position_limits(self, equity, margin):
+        limit = max(D(0), min(dec(equity), dec(self.config.paper_balance_usdc))) * dec(self.config.max_margin_fraction)
+        leverage = dec(self.config.paper_leverage)
+        return {"position_notional_usdc": str(dec(margin) * leverage),
+                "margin_limit_usdc": str(limit), "entry_notional_limit_usdc": str(limit * leverage)}

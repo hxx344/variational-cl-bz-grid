@@ -96,6 +96,16 @@ class Store:
                 "turnover_usdc": self.get("turnover_usdc"),
                 "fill_count": int(self.get("fill_count"))}
 
+    def reset(self, config):
+        with self.transaction():
+            for table in ("fills", "lots", "ticks", "events", "meta"):
+                self.db.execute("DELETE FROM " + table)
+            for key, value in {"config": config.strategy_identity(), "cash": config.paper_balance_usdc,
+                               "peak": config.paper_balance_usdc, "halted": "", "blocked": "[]",
+                               "fees": "0", "realized": "0", "schema_version": "1",
+                               "volume_barrels": "0", "turnover_usdc": "0", "fill_count": "0"}.items():
+                self.set(key, value)
+
     def get(self, key, default=None):
         row = self.db.execute("SELECT value FROM meta WHERE key=?", (key,)).fetchone()
         return row[0] if row else default

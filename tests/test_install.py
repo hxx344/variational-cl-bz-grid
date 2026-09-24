@@ -321,6 +321,38 @@ if name == "runuser":
         self.install('--compare')
         self.assertEqual(self.restarts(), [])
 
+    def test_seven_day_install_migrates_both_modes_once_without_touching_old_data(self):
+        self.install()
+        config_path = self.conf / 'config.json'
+        config = json.loads(config_path.read_text())
+        config.pop('center_hours')
+        config_path.write_text(json.dumps(config))
+        original_config = config_path.read_bytes()
+        path = self.conf / 'experiments.json'
+        spec = json.loads(path.read_text())
+        spec.pop('center_hours')
+        old_output = self.state / 'comparison-pct-05-1-2-range30'
+        old_output.mkdir()
+        sentinel = old_output / 'ledger-sentinel'
+        sentinel.write_bytes(b'old seven-day data')
+        spec['output_dir'] = str(old_output)
+        path.write_text(json.dumps(spec))
+        original_spec = path.read_bytes()
+        result = self.install('--compare')
+        updated = json.loads(path.read_text())
+        self.assertEqual(updated['center_hours'], 72)
+        self.assertEqual(updated['output_dir'], str(old_output)+'-center3d')
+        self.assertEqual((self.conf / 'experiments.before-center3d.json').read_bytes(), original_spec)
+        self.assertEqual(config_path.read_bytes(), original_config)
+        self.assertEqual(sentinel.read_bytes(), b'old seven-day data')
+        self.assertIn('Updated center to 3 days', result.stdout)
+        self.log.write_text('')
+        self.install('--compare')
+        self.assertEqual(self.restarts(), [])
+        self.install('--single')
+        self.assertEqual(json.loads(config_path.read_text())['center_hours'], 72)
+        self.assertEqual((self.conf / 'config.before-center3d.json').read_bytes(), original_config)
+
     def test_previous_percentage_install_migrates_to_full_range(self):
         self.install()
         path = self.conf / 'experiments.json'

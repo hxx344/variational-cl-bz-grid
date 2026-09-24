@@ -174,8 +174,8 @@ class Client:
         except (KeyError, TypeError, AttributeError):
             raise GridError("Market metadata schema changed") from None
 
-    def candles(self, symbol, hour_end):
-        return self.request("GET", "/candles", query={"cex_asset": symbol, "period": "1h", "start": utc(hour_end - WINDOW * HOUR), "end": utc(hour_end)})
+    def candles(self, symbol, hour_end, hours=WINDOW):
+        return self.request("GET", "/candles", query={"cex_asset": symbol, "period": "1h", "start": utc(hour_end - hours * HOUR), "end": utc(hour_end)})
 
     def quote(self, symbol, qty):
         data = self.request("POST", "/quotes/indicative", body={"instrument": {"underlying": symbol, "instrument_type": "perpetual_rwa_future", "settlement_asset": "USDC", "kind": "commodity"}, "qty": str(qty)})

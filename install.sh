@@ -13,6 +13,7 @@ Each direction spans 30% of the center: 60 / 30 / 15 levels respectively.
 The comparison includes a localhost dashboard on port 9876, accessed over SSH.
 Repeating the command upgrades code and preserves mode, settings and data.
 Earlier default experiments migrate to +/-30% with a backup and new ledgers.
+Earlier seven-day centers migrate to three days with separate preserved ledgers.
 Unchanged dependencies, validated code and running services are reused.
   --compare  Start the three-grid comparison (also switches existing installs).
   --single   Start one grid using config.json.
@@ -394,7 +395,7 @@ import json, sys
 from pathlib import Path
 data = json.loads(Path(sys.argv[1]).read_text())
 data['base_config'] = '/etc/variational-grid/config.json'
-data['output_dir'] = '/var/lib/variational-grid/comparison-pct-05-1-2-range30'
+data['output_dir'] = '/var/lib/variational-grid/comparison-pct-05-1-2-range30-center3d'
 Path(sys.argv[2]).write_text(json.dumps(data, indent=2) + '\n')
 PY
   chmod 644 "$conf/experiments.json"
@@ -440,6 +441,19 @@ else:
 PY
   )
 fi
+(cd "$release" && python3 - "$mode" "$conf" <<'PY'
+import sys
+from pathlib import Path
+from variational_grid.migration import upgrade_center
+comparison = sys.argv[1] == 'compare'
+path = Path(sys.argv[2]) / ('experiments.json' if comparison else 'config.json')
+backup = upgrade_center(path, comparison=comparison)
+if backup:
+    print(f'Updated center to 3 days (72 closed hours); a new simulation will start. Old settings: {backup}; old ledgers preserved.')
+else:
+    print('Three-day center already configured; skipping center migration.')
+PY
+)
 settings_key=$({
   printf '%s\n' "$mode"
   sha256sum "$conf/config.json"
@@ -488,7 +502,7 @@ if [[ $mode == compare ]]; then
   sed -i 's|^ExecStart=.*|ExecStart=/usr/bin/python3 -m variational_grid compare --experiments /etc/variational-grid/experiments.json|' "$deployment/variational-grid.service"
   cat >"$deployment/variational-grid-web.service" <<'UNIT'
 [Unit]
-Description=Variational read-only grid dashboard (localhost)
+Description=Variational paper grid dashboard (localhost)
 After=variational-grid.service
 
 [Service]

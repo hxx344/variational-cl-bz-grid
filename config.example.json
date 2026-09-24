@@ -1,5 +1,6 @@
 {
   "mode": "paper",
+  "center_hours": 72,
   "paper_balance_usdc": "1000",
   "quantity_barrels": "1",
   "grid_step_percent": "1",

@@ -1,6 +1,7 @@
 {
   "base_config": "config.local.json",
-  "output_dir": "data/comparison-pct-05-1-2-range30",
+  "center_hours": 72,
+  "output_dir": "data/comparison-pct-05-1-2-range30-center3d",
   "scenarios": [
     {"name": "step-0.5pct", "overrides": {"grid_step_percent": "0.5", "max_levels": 60}},
     {"name": "step-1pct", "overrides": {"grid_step_percent": "1", "max_levels": 30}},

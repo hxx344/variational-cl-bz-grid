@@ -39,7 +39,7 @@ class CliTests(unittest.TestCase):
                 pass
             def check_session(self):
                 return {"authenticated": True}
-            def candles(self, symbol, end):
+            def candles(self, symbol, end, hours=72):
                 return []
             def quote(self, *_):
                 raise AssertionError("Quote should not be requested without history")

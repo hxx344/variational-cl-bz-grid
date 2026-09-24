@@ -1,4 +1,4 @@
-/* Read-only presentation. Amounts are calculated in Decimal on the server. */
+/* Paper monitoring and reset requests. Amounts are calculated in Decimal on the server. */
 (() => {
   'use strict';
   const M = window.GridModel, $ = id => document.getElementById(id), E = M.escape;
@@ -25,10 +25,11 @@
 
   function status() {
     if (!data) return;
+    resetStatus();
     const age = data.summary ? Math.max(0, serverAge + (Date.now()-received)/1000) : null;
     const old = age !== null && age > Math.max(60, data.summary.poll_seconds*3);
     const runtime = data.runtime.status;
-    const labels = {running:'模拟运行中',paused:'行情暂停',stopped:'模拟已停止',starting:'等待行情'};
+    const labels = {running:'模拟运行中',paused:'行情暂停',stopped:'模拟已停止',starting:'等待行情',resetting:'正在重置'};
     $('status').textContent = disconnected ? '页面连接中断' : old ? '行情已过期' : labels[runtime] || '状态未知';
     $('status').className = 'status' + (disconnected ? ' error' : old || runtime !== 'running' ? ' warn' : '');
     $('freshness').textContent = age === null ? '等待第一份有效行情' : `最近有效行情 ${M.date(data.summary.ts)} · ${Math.floor(age)} 秒前 · 每 ${data.summary.poll_seconds} 秒采样`;
@@ -43,8 +44,13 @@
 
   function renderStrategies() {
     const rows = data?.summary?.scenarios || [];
-    if (!rows.length) { $('strategies').innerHTML = '<div class="empty initial">暂无有效采样。模拟服务开始接收行情后，三组结果会自动显示。</div>'; return; }
-    $('strategies').innerHTML = rows.map(r => `<button class="strategy ${cls(r.name)} ${state.strategy === r.name ? 'selected' : ''}" data-strategy="${E(r.name)}" aria-pressed="${state.strategy === r.name}" aria-label="查看${E(label(r))}策略"><div class="strategy-head"><h3>${E(label(r))}</h3><span class="step">${r.open_pairs} / ${r.max_levels} 组持仓</span></div><p class="grid-conversion">当前一格 ${M.number(r.grid_step,6)} USDC/桶</p><p class="grid-range">${E(M.rangeLabel(r))}<span>${M.number(r.grid_lower,4)} ～ ${M.number(r.grid_upper,4)} USDC/桶</span></p><span class="pnl-label">累计损益 / USDC</span><strong class="big-pnl ${M.tone(r.total_pnl_usdc)}">${M.signed(r.total_pnl_usdc)}<small>USDC</small></strong><div class="strategy-stats"><div><label>已实现</label><b class="${M.tone(r.realized_pnl_usdc)}">${M.signed(r.realized_pnl_usdc)}</b></div><div><label>持仓浮盈亏</label><b class="${M.tone(Number(r.total_pnl_usdc)-Number(r.realized_pnl_usdc))}">${M.signed(Number(r.total_pnl_usdc)-Number(r.realized_pnl_usdc))}</b></div><div><label>最大回撤</label><b>${M.number(Number(r.max_drawdown_fraction)*100,3)}%</b></div></div><div class="volume-stats"><div><label>累计成交额 / USDC</label><b>${M.number(r.turnover_usdc,2)}</b></div><div><label>累计成交量 / 桶</label><b>${M.number(r.volume_barrels,3)}</b></div></div><div class="mini-stats"><span>权益 <b>${M.number(r.equity_usdc,2)}</b></span><span>已平仓 <b>${r.closed_pairs} 组</b></span></div></button>`).join('');
+    if (!rows.length) {
+      $('strategies').innerHTML = '<div class="empty initial">暂无有效采样。模拟服务开始接收行情后，三组结果会自动显示。</div>';
+      $('experiment-info').textContent='等待本轮第一份有效行情'; $('source-window').textContent='';
+      $('strategy-select').innerHTML='<option value="all">全部策略</option>';
+      return;
+    }
+    $('strategies').innerHTML = rows.map(r => `<button class="strategy ${cls(r.name)} ${state.strategy === r.name ? 'selected' : ''}" data-strategy="${E(r.name)}" aria-pressed="${state.strategy === r.name}" aria-label="查看${E(label(r))}策略"><div class="strategy-head"><h3>${E(label(r))}</h3><span class="step">${r.open_pairs} / ${r.max_levels} 组持仓</span></div><p class="grid-conversion">当前一格 ${M.number(r.grid_step,6)} USDC/桶</p><p class="grid-range">${E(M.rangeLabel(r))}<span>${M.number(r.grid_lower,4)} ～ ${M.number(r.grid_upper,4)} USDC/桶</span></p><span class="pnl-label">累计损益 / USDC</span><strong class="big-pnl ${M.tone(r.total_pnl_usdc)}">${M.signed(r.total_pnl_usdc)}<small>USDC</small></strong><div class="strategy-stats"><div><label>已实现</label><b class="${M.tone(r.realized_pnl_usdc)}">${M.signed(r.realized_pnl_usdc)}</b></div><div><label>持仓浮盈亏</label><b class="${M.tone(Number(r.total_pnl_usdc)-Number(r.realized_pnl_usdc))}">${M.signed(Number(r.total_pnl_usdc)-Number(r.realized_pnl_usdc))}</b></div><div><label>最大回撤</label><b>${M.number(Number(r.max_drawdown_fraction)*100,3)}%</b></div></div><div class="volume-stats"><div><label>累计成交额 / USDC</label><b>${M.number(r.turnover_usdc,2)}</b></div><div><label>累计成交量 / 桶</label><b>${M.number(r.volume_barrels,3)}</b></div></div><div class="position-limits"><span>双腿持仓金额 / 开仓额度</span><b>${M.number(r.position_notional_usdc,2)} / ${M.number(r.entry_notional_limit_usdc,2)} USDC</b><small>保证金 ${M.number(r.margin_usdc,2)} / ${M.number(r.margin_limit_usdc,2)} USDC</small></div><div class="mini-stats"><span>权益 <b>${M.number(r.equity_usdc,2)}</b></span><span>已平仓 <b>${r.closed_pairs} 组</b></span></div></button>`).join('');
     $('strategy-select').innerHTML = '<option value="all">全部策略</option>' + rows.map(r => `<option value="${E(r.name)}">${E(label(r))}</option>`).join('');
     $('strategy-select').value = state.strategy;
     const s = data.summary;
@@ -108,7 +114,7 @@
     const shown={'1h':'1 小时','24h':'24 小时','7d':'7 天'}[data?.history.range] || '24 小时';
     $('history-note').textContent=`当前图表：最近 ${shown}，截至最后有效行情。${n.toLocaleString()} 次有效采样${n>points.length?'，按区间保留高低点，绘制 '+points.length+' 点':''}。缺失行情断线；点击图表或拖动采样条查看。`;
     const s=data?.summary, r=rows[0];
-    $('spread-value').textContent=M.number(r?.spread_bz_minus_cl); $('center-value').textContent=M.number(s?.center_7d);
+    $('spread-value').textContent=M.number(r?.spread_bz_minus_cl); $('center-value').textContent=M.number(s?.center);
     $('deviation').textContent=r?`偏离 ${M.signed(r.deviation,3)}`:'—';
     $('cl-mark').textContent=M.number(r?.cl_mark); $('bz-mark').textContent=M.number(r?.bz_mark);
     document.querySelectorAll('[data-range]').forEach(b=>b.setAttribute('aria-pressed',b.dataset.range===state.range));
@@ -147,7 +153,7 @@
     $('export').hidden=!isTrades; $('export').disabled=!trades.length;
     if(state.view==='parameters') {
       $('detail-content').innerHTML='<div class="table-wrap" tabindex="0" aria-label="参数对照表"><table class="parameters-table"><thead><tr><th>策略</th><th>当前一格 / USDC/桶</th><th>覆盖范围</th><th>初始资金 / USDC</th><th>每腿桶数</th><th>每侧层数 / 持仓上限</th><th>杠杆估算</th><th>手续费 / 滑点 bp</th><th>最长持仓</th><th>状态</th></tr></thead><tbody>'+scenarios().map(r=>`<tr><td class="row-name ${cls(r.name)}">${E(label(r))}</td><td>${M.number(r.grid_step,6)}</td><td>${E(M.rangeLabel(r))}<span class="secondary">${M.number(r.grid_lower,4)} ～ ${M.number(r.grid_upper,4)} USDC/桶</span></td><td>${M.number(r.initial_balance_usdc,2)}</td><td>${M.number(r.quantity_barrels,3)}</td><td>${r.max_levels}</td><td>${M.number(r.paper_leverage,1)} 倍</td><td>${M.number(r.fee_bps,1)} / ${M.number(r.slippage_bps,1)}</td><td>${r.max_holding_hours ?? '—'} 小时</td><td>${r.halted?'回撤停机':r.skip_reason==='zero_center'?'中枢为零，暂停开仓':r.open_allowed?'正常':'只减仓'}</td></tr>`).join('')+'</tbody></table></div>';
-      $('pagination').hidden=true; $('detail-note').textContent='百分比基于七日平均价差中枢的绝对值。当前一格随中枢更新；每笔净止盈目标按开仓时的一格固定。中枢为零时暂停开仓。层数按覆盖范围配置，实际开仓受保证金与回撤限制；保证金为本地估算。'; return;
+      $('pagination').hidden=true; $('detail-note').textContent='百分比基于所选窗口平均价差中枢的绝对值。当前一格随中枢更新；每笔净止盈目标按开仓时的一格固定。中枢为零时暂停开仓。层数按覆盖范围配置，实际开仓受保证金与回撤限制；保证金为本地估算。'; return;
     }
     const rows=isTrades?trades:positions, size=15, pages=Math.max(1,Math.ceil(rows.length/size));
     page=Math.min(page,pages-1);
@@ -163,6 +169,10 @@
   }
 
   function render() {
+    const days=(data?.summary?.center_window_hours ?? data?.center_window_hours ?? 72)/24;
+    document.querySelectorAll('[data-center-label]').forEach(el=>el.textContent=days+' 日中枢');
+    $('method-hours').textContent=days*24;
+    $('spread-chart').setAttribute('aria-label', 'BZ减CL价差和'+days+'日中枢折线图');
     const active=document.activeElement, strategyFocus=active?.dataset?.strategy;
     renderStrategies(); renderCharts(); renderGrid(); renderDetails(); status();
     if(strategyFocus) Array.from(document.querySelectorAll('[data-strategy]')).find(b=>b.dataset.strategy===strategyFocus)?.focus({preventScroll:true});
@@ -177,6 +187,7 @@
       if(!response.ok) throw new Error('HTTP '+response.status);
       const next=await response.json();
       if(request!==controller) return;
+      if(data?.reset?.generation !== next.reset?.generation) {selectedTs=null;page=0;}
       data=next; received=Date.now(); serverAge=data.summary?data.server_ts-data.summary.ts:0; disconnected=false;
       // Preserve URL state while waiting for the first published sample.
       if(data.summary) state=M.state(location.search,names());
@@ -191,6 +202,34 @@
       if(request===controller) { $('refresh').disabled=false; if(!document.hidden) timer=setTimeout(refresh,10000); }
     }
   }
+
+  let resetSending=false, resetError='', resetGeneration=null;
+  function resetStatus() {
+    const r=data?.reset, busy=r && ['pending','archiving','clearing'].includes(r.status);
+    $('reset').disabled=!r || busy || resetSending || disconnected;
+    let message=resetError;
+    if(busy) message=r.status==='pending'?'重置请求已保存，等待模拟进程完成当前采样；若进程已停止，需先启动模拟服务。':'正在归档并重置全部模拟策略…';
+    else if(r?.status==='complete') message='已重置，旧账本已归档。当前显示新一轮模拟；归档编号 '+r.archive_id;
+    else if(r?.status==='failed') message='归档失败，原模拟数据已保留；请检查磁盘空间与服务日志后重试。';
+    $('reset-message').textContent=message; $('reset-message').hidden=!message;
+  }
+  $('reset').onclick=()=>{
+    resetGeneration=data?.reset?.generation;
+    $('reset-balances').textContent=(data?.summary?.scenarios || []).map(r=>label(r)+'：'+M.number(r.initial_balance_usdc,2)+' USDC').join('；');
+    $('reset-dialog').showModal();
+  };
+  $('reset-cancel').onclick=()=>$('reset-dialog').close();
+  $('reset-confirm').onclick=async()=>{
+    if(resetSending) return;
+    resetSending=true; resetError=''; $('reset-dialog').close(); resetStatus();
+    const abort=new AbortController(), timeout=setTimeout(()=>abort.abort(),8000);
+    try {
+      const response=await fetch('/api/reset',{method:'POST',headers:{'Content-Type':'application/json','X-Reset-Token':data.reset_token},body:JSON.stringify({generation:resetGeneration}),signal:abort.signal});
+      if(!response.ok) throw new Error();
+      data.reset=(await response.json()).reset;
+    } catch {resetError='重置请求结果尚未确认，请刷新查看状态；旧页面或连接中断时不会自动重复提交。';}
+    finally {clearTimeout(timeout);resetSending=false;resetStatus();refresh();}
+  };
 
   $('refresh').addEventListener('click',refresh);
   document.querySelector('.tabs').addEventListener('keydown',event=>{

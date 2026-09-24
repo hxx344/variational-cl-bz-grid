@@ -75,8 +75,8 @@ def run(args):
                 try:
                     hour_end = int(time.time()) // HOUR * HOUR
                     if hour_end != cached_hour:
-                        cl_rows, bz_rows = paired(lambda s: client.candles(s, hour_end))
-                        center = rolling_center(cl_rows, bz_rows, hour_end)
+                        cl_rows, bz_rows = paired(lambda s: client.candles(s, hour_end, config.center_hours))
+                        center = rolling_center(cl_rows, bz_rows, hour_end, config.center_hours)
                         cached_hour = hour_end
                     markets = paired(client.market)
                     if not all(opened for opened, _ in markets):
@@ -86,7 +86,7 @@ def run(args):
                     if int(now) // HOUR * HOUR != cached_hour:
                         raise GridError("UTC hour changed while fetching data; refresh history next poll")
                     snapshot = engine.tick(center, cl, bz, now, allow_open=not any(close_only for _, close_only in markets))
-                    snapshot["history_start_utc"] = utc(cached_hour - WINDOW * HOUR)
+                    snapshot["history_start_utc"] = utc(cached_hour - config.center_hours * HOUR)
                     snapshot["history_end_utc"] = utc(cached_hour)
                     emit(snapshot)
                     failures = 0
@@ -204,7 +204,12 @@ def main(argv=None):
             sub.add_argument("--once", action="store_true")
             sub.add_argument("--iterations", type=int, default=0)
     from .dashboard import serve_dashboard
-    sub = commands.add_parser("dashboard", help="Read-only web monitor through a localhost SSH tunnel")
+    from .reset import reset_comparison
+    sub = commands.add_parser("compare-reset", help="Archive and reset all paper scenarios")
+    sub.add_argument("--experiments", default="experiments.example.json")
+    sub.add_argument("--confirm", action="store_true")
+    sub.set_defaults(function=reset_comparison)
+    sub = commands.add_parser("dashboard", help="Paper web monitor through a localhost SSH tunnel")
     sub.add_argument("--experiments", default="experiments.example.json")
     sub.add_argument("--port", type=int, default=9876)
     sub.set_defaults(function=serve_dashboard)
