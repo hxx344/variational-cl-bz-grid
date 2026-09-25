@@ -325,11 +325,11 @@ python -m variational_grid inventory-demo --output output/inventory-divergence -
 
 ## Lighter QQQ 剥头皮与 US100 对冲：三组
 
-三个独立模拟账户分别使用 **0.05% / 0.1% / 0.2%** 止盈比例，新开仓不再要求与已有批次保持价格距离；QQQ 只做多，最多 30 个占用批次，每批计划 1,000 USDC。US100 用于按需对冲，每组统一 **3,000 USDC 净敞口阈值**。参数见 `qqq-hedge.example.json`，各组独立保存两腿损益、持仓、成交数量和成交额。`grid_step_percent` 保留用于历史配置兼容及缺省 TP，v2 不用它判断新开仓资格。
+三个独立模拟账户分别使用 **0.05% / 0.1% / 0.2%** 止盈比例，新开仓不再要求与已有批次保持价格距离；QQQ 只做多，最多 30 个占用批次，每批计划 1,000 USDC。US100 用于按需对冲，每组统一 **3,000 USDC 净敞口阈值**。参数见 `qqq-hedge.example.json`，各组独立保存两腿损益、持仓、成交数量和成交额。`grid_step_percent` 保留用于历史配置兼容及缺省 TP，v2/v3 不用它判断新开仓资格。
 
-新模型 `perp_dex_scalper_v2` 在原 `perp_dex_scalper_v1` 上取消开仓距离资格检查，其余开仓、等待与止盈规则继续参考 [perp-dex-tools 的 TradingBot](https://github.com/your-quantguy/perp-dex-tools/blob/4679a339b8cdc9998707feeda3c5d8b84fb8681f/trading_bot.py) 和 [Lighter 适配器](https://github.com/your-quantguy/perp-dex-tools/blob/4679a339b8cdc9998707feeda3c5d8b84fb8681f/exchanges/lighter.py)：一次只挂一张近盘口开仓单，成交后逐批挂独立止盈。30 指最多占用批次，并非同时预挂 30 张买单。下一笔开仓价根据当时盘口计算，批次编号单调递增。
+新模型 `perp_dex_scalper_v3` 保留 v2 取消开仓距离门槛的规则，并修复止盈单被严格 Maker 限制拦截的问题。开仓、等待与逐批止盈参考 [perp-dex-tools 的 TradingBot](https://github.com/your-quantguy/perp-dex-tools/blob/4679a339b8cdc9998707feeda3c5d8b84fb8681f/trading_bot.py) 和 [Lighter 适配器](https://github.com/your-quantguy/perp-dex-tools/blob/4679a339b8cdc9998707feeda3c5d8b84fb8681f/exchanges/lighter.py)：一次只挂一张近盘口开仓单，成交后逐批挂独立止盈。30 指最多占用批次，并非同时预挂 30 张买单。下一笔开仓价根据当时盘口计算，批次编号单调递增。
 
-基础等待 `scalper.wait_seconds=450`，从上一笔开仓完成（或部分成交撤单确认）开始计时。未平仓批次数为 0–4 / 5–9 / 10–19 / 20–29 时，等待分别为 **112.5 / 225 / 450 / 900 秒**；等待时间需严格超过该值。若未平仓批次数比上一次开仓决策减少，本轮跳过冷却；v2 无价格距离资格检查，但仍需行情可用、已有批次有止盈单及 Maker 挂单条件成立。达到 30 个占用批次暂停加仓。
+基础等待 `scalper.wait_seconds=450`，从上一笔开仓完成（或部分成交撤单确认）开始计时。未平仓批次数为 0–4 / 5–9 / 10–19 / 20–29 时，等待分别为 **112.5 / 225 / 450 / 900 秒**；等待时间需严格超过该值。若未平仓批次数比上一次开仓决策减少，本轮跳过冷却；v2/v3 无价格距离资格检查，但仍需行情可用、已有批次有止盈单及 Maker 挂单条件成立。达到 30 个占用批次暂停加仓。
 
 取消资格门槛不改变挂单取价，`tp` 是止盈百分比除以 100：
 
@@ -341,9 +341,9 @@ python -m variational_grid inventory-demo --output output/inventory-divergence -
 
 候选开仓价按 tick 四舍五入，再限制到 `ask − tick`，保持 Maker。未成交开仓单在提交 20 秒后首次检查，随后每 5 秒检查：候选价格上涨则撤单，撤单生效后重新判断入场；持平或下降则继续等待。部分成交先保留剩余开仓单，完全成交或撤单确认后，仅为实际成交数量挂止盈。行情恢复时重建止盈，不补造缺口期间的成交；止盈暂时无法挂出时暂停继续加仓。
 
-原适配器实际使用 GTT 限价单；本程序沿用**严格 Maker 的公开逐笔、可见排队量、提交及撤单延迟模拟**，不复制原 SDK 的真实下单行为。仅触价不直接成交，同一批采样不能成交刚生成的止盈单。三组最多各占用 30 批库存，满批计划入场金额约 30,000 USDC，市值随价格变化，US100 对冲金额另计。旧配置未指定 `scalper` 时继续按旧固定锚点模型读取和运行。
+原适配器实际使用 GTT 限价单。**v3 开仓保留 Maker 模拟，止盈允许作为普通限价单成交**：确认开仓完成或部分成交撤单后提交 TP，等待提交延迟结束且盘口源时间晚于提交时间的新盘口，再按不低于止盈限价的可见买盘从高到低逐档模拟成交；同账户各 TP 共用本帧深度。剩余量进入 Maker 队列，后续由公开逐笔驱动，不反复扫描盘口；新 TP 不使用提交帧的旧逐笔或缓存盘口成交。成交记录区分 Maker/Taker、价格及盘口来源时间，手续费沿用配置的 `lighter_fee_bps`，未单独区分费率。低于最小数量或金额的首次 TP 会保留库存、明确显示原因并暂停加仓；不假定小额平仓可豁免交易所限制。已合法提交的 TP 部分成交后，即使余量低于新单门槛仍继续挂单。三组最多各占用 30 批库存，满批计划入场金额约 30,000 USDC，市值随价格变化，US100 对冲金额另计。旧配置未指定 `scalper` 时继续按旧固定锚点模型读取和运行。
 
-历史 `perp_dex_scalper_v1` 保留原规则：有未平仓批次时要求 `min(已有止盈价) / [当前 ask × (1 + tp)] > 1 + step`，失败会消耗本轮冷却豁免；未指定 `scalper.model` 的已有剥头皮配置仍解释为 v1。新旧模型不能直接续写同一账本。
+历史 v1/v2 保留严格 Maker 成交模型。`perp_dex_scalper_v1` 保留原距离规则：有未平仓批次时要求 `min(已有止盈价) / [当前 ask × (1 + tp)] > 1 + step`，失败会消耗本轮冷却豁免；未指定 `scalper.model` 的已有剥头皮配置仍解释为 v1。新旧模型不能直接续写同一账本。
 
 对冲按美元净名义金额计算，数量带方向：
 
@@ -392,9 +392,9 @@ HTTP冷却独立于缓存可用性。每次Var请求占用3秒预算，429后6�
 curl -fsSL https://raw.githubusercontent.com/hxx344/variational-grid/main/install.sh | sudo bash -s -- --qqq-hedge
 ```
 
-此次仅切换行情认证，已有 v2 三组配置、持仓和损益继续累计，不重置账本。安装器复用 `/etc/variational-grid/config.json` 的 `session_file`（默认 `/var/lib/variational-grid/session.json`），缺失或过期时在服务器终端隐藏输入 vr-token。运行中更新该文件后自动恢复，无需重启。
+单独更新行情会话不会重置账本；本次 v3 升级改变止盈成交口径，识别到默认旧配置时会按下文迁入新一轮模拟。安装器复用 `/etc/variational-grid/config.json` 的 `session_file`（默认 `/var/lib/variational-grid/session.json`），缺失或过期时在服务器终端隐藏输入 vr-token。运行中更新该文件后自动恢复，无需重启。
 
-配置在 `/etc/variational-grid/qqq-hedge.json`，首次安装默认数据目录 `/var/lib/variational-grid/qqq-hedge-scalper-v2/`。识别到默认 v1 剥头皮三组，或历史默认九组/三组固定锚点配置时，安装器备份原配置为 `qqq-hedge.before-scalper-v2.json`，将原目录名加上 `-scalper-v2` 后开始无距离门槛的新三组模拟。旧配置、旧持仓与损益账本、已有 v1 备份和 CL/BZ 数据均原样保留；新一轮从空仓与零统计开始，仅继承有效鉴权报价缓存和限流冷却。自定义时序、TP、组合或经济参数不会被自动覆盖。重复执行采用增量更新，未变化时复用代码和验证结果，不重复重启；服务器仅执行快速离线部署检查，完整测试在 CI 执行。
+配置在 `/etc/variational-grid/qqq-hedge.json`，首次安装默认数据目录 `/var/lib/variational-grid/qqq-hedge-scalper-v3/`。识别到默认 v1/v2 剥头皮三组，或历史默认九组/三组固定锚点配置时，安装器备份原配置为 `qqq-hedge.before-scalper-v3.json`，将原目录名加上 `-scalper-v3` 后开始支持 GTT 止盈的新三组模拟。旧配置、旧持仓与损益账本、已有 v1/v2 备份和 CL/BZ 数据均原样保留；新一轮从空仓与零统计开始，仅继承有效鉴权报价缓存和限流冷却。自定义时序、TP、组合或经济参数不会被自动覆盖；自定义配置需保留原参数，将 `scalper.model` 改为 `perp_dex_scalper_v3` 并指定新的空 `output_dir` 后再运行。重复执行采用增量更新，未变化时复用代码和验证结果，不重复重启；服务器仅执行快速离线部署检查，完整测试在 CI 执行。
 
 QQQ 监控页右上角的 **更新 Var token** 可直接粘贴新令牌。页面使用遮挡输入，服务先向固定 `/api/me` 验证，成功才原子替换受保护会话文件；失败保留原会话。保存后策略自动读取，无需重启或重置模拟。输入不会写入浏览器存储、URL 或日志。此操作仍通过 localhost / SSH 转发访问；服务仅接受同源及页面随机校验令牌，不接受自定义路径或接口地址。每次手动提交最多一次会话验证，不随页面刷新询问 Var。
 
@@ -404,7 +404,7 @@ QQQ 监控页右上角的 **更新 Var token** 可直接粘贴新令牌。页面
 ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=6 -L 127.0.0.1:18765:127.0.0.1:9876 USER@SERVER_IP
 ```
 
-浏览器打开 [监控页](http://127.0.0.1:18765/)。各账户图表、两腿损益与成交量分别显示；新三组的敞口图单位为USDC，阈值线为±3000，旧百分比实验保持原单位。剥头皮卡片显示下一次开仓的冷却进度、百分比与剩余秒数，按各组当前档位的总等待时间计算，正常运行时每秒推算，无额外行情请求。100%仅表示冷却已到，实际开仓仍需策略采样确认批次容量、行情与 Maker 条件；历史 v1 另检查价格距离。已有开仓单时显示处理中，不套用上一轮冷却。行情过期、服务停止或页面断连时恢复最后采样值并标注暂停推算。v2 明确显示门槛已取消，并按三档止盈目标命名账户；历史页保留原模型语义。
+浏览器打开 [监控页](http://127.0.0.1:18765/)。各账户图表、两腿损益与成交量分别显示；新三组的敞口图单位为USDC，阈值线为±3000，旧百分比实验保持原单位。剥头皮卡片显示下一次开仓的冷却进度、百分比与剩余秒数，按各组当前档位的总等待时间计算，正常运行时每秒推算，无额外行情请求。100%仅表示冷却已到，实际开仓仍需策略采样确认批次容量、行情与 Maker 条件；历史 v1 另检查价格距离。已有开仓单时显示处理中，不套用上一轮冷却。行情过期、服务停止或页面断连时恢复最后采样值并标注暂停推算。v2/v3 明确显示门槛已取消，并按三档止盈目标命名账户；历史页保留原模型语义。
 
 ```bash
 python -m variational_grid compare --experiments qqq-hedge.example.json

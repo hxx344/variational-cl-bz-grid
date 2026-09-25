@@ -1,4 +1,4 @@
-"""Move recognized ladder/v1 defaults into a separate distance-free scalper run."""
+"""Move recognized defaults into a separate run with GTT take-profit exits."""
 from dataclasses import asdict, replace
 import json
 import os
@@ -11,7 +11,7 @@ from .qqq_hedge import QQQSettings
 from .qqq_scalper import CURRENT_MODEL, ScalperSettings
 
 
-VERSION = "-scalper-v2"
+VERSION = "-scalper-v3"
 
 
 def upgrade_qqq_defaults(path):
@@ -26,7 +26,8 @@ def upgrade_qqq_defaults(path):
     if not (nine or len(rows) == 3 and names == set(three)):
         return None
     previous = QQQExperiment.load(path)
-    if previous.scalper is not None and (nine or previous.scalper != ScalperSettings()):
+    if previous.scalper is not None and (nine or previous.scalper not in (
+            ScalperSettings(), ScalperSettings(model="perp_dex_scalper_v2"))):
         return None  # Latest model and customized scalper timing are preserved.
     defaults = QQQSettings() if nine else replace(QQQSettings(), var_slippage_bps="0")
     if (asdict(previous.settings) != asdict(defaults) or Path(data["output_dir"]).name.endswith(VERSION)

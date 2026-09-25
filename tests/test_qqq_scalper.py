@@ -169,7 +169,7 @@ class ScalperTests(unittest.TestCase):
 class DistanceFreeScalperTests(ScalperTests):
     # Exercise the existing order-lifetime cases against v2 as well as v1.
     def setUp(self):
-        self.config = replace(config(), scalper=ScalperSettings(model=CURRENT_MODEL))
+        self.config = replace(config(), scalper=ScalperSettings(model="perp_dex_scalper_v2"))
         self.account, _ = maker_step(initial_account(), market(100), 100, self.config, True)
 
     def test_single_near_book_entry_and_independent_tp_after_complete_fill(self):
@@ -177,7 +177,7 @@ class DistanceFreeScalperTests(ScalperTests):
         self.assertEqual(account["scalper"]["status"]["phase"], "cooling_down")
         self.assertEqual([o["side"] for o in account["orders"]], ["sell"])
         _, fills = maker_step(self.account, market(102, [trade(1, 101, "100", "10")]), 102, self.config, True)
-        self.assertEqual(fills[0]["maker_model"], CURRENT_MODEL)
+        self.assertEqual(fills[0]["maker_model"], "perp_dex_scalper_v2")
 
     def test_grid_gate_uses_ask_tp_and_strict_comparison(self):
         # v2 removes eligibility distance, but preserves TP and Maker limit pricing.
@@ -212,7 +212,7 @@ class DistanceFreeScalperTests(ScalperTests):
 
 class DurableScalperTests(unittest.TestCase):
     def test_restart_recovery_and_reset_preserve_or_clear_decisions_exactly(self):
-        for model in ("perp_dex_scalper_v1", CURRENT_MODEL):
+        for model in ("perp_dex_scalper_v1", "perp_dex_scalper_v2", CURRENT_MODEL):
             with self.subTest(model=model):
                 self.check_restart_recovery_and_reset(model)
 

@@ -1,9 +1,9 @@
 {
   "kind": "qqq_hedge",
   "base_config": "config.example.json",
-  "output_dir": "data/qqq-hedge-scalper-v2",
+  "output_dir": "data/qqq-hedge-scalper-v3",
   "scalper": {
-    "model": "perp_dex_scalper_v2",
+    "model": "perp_dex_scalper_v3",
     "wait_seconds": 450,
     "reprice_after_seconds": 20,
     "reprice_poll_seconds": 5

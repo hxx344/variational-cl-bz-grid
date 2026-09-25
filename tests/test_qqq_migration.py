@@ -92,7 +92,7 @@ class MigrationTests(unittest.TestCase):
             upgrade_qqq_defaults(self.path)
         self.assertEqual(self.path.read_bytes(), original)
         self.assertEqual(sentinel.read_bytes(), b"keep")
-        backup = self.path.with_name("qqq.before-scalper-v2.json")
+        backup = self.path.with_name("qqq.before-scalper-v3.json")
         backup.write_bytes(b"other config")
         with self.assertRaisesRegex(GridError, "backup"):
             upgrade_qqq_defaults(self.path)
@@ -152,6 +152,39 @@ class MigrationTests(unittest.TestCase):
         updated = self.path.read_bytes()
         self.assertIsNone(upgrade_qqq_defaults(self.path))
         self.assertEqual(updated, self.path.read_bytes())
+
+    def test_v2_upgrade_separates_execution_model_and_preserves_all_old_files(self):
+        data = scalper_spec(output="old-scalper-v2")
+        data["scalper"]["model"] = "perp_dex_scalper_v2"
+        self.path.write_text(json.dumps(data))
+        old = QQQExperiment.load(self.path)
+        with QQQCohort(old):
+            pass
+        history = {p.relative_to(old.output): p.read_bytes() for p in old.output.rglob("*") if p.is_file()}
+        original = self.path.read_bytes()
+        previous_backup = self.path.with_name("qqq.before-scalper-v2.json")
+        previous_backup.write_bytes(b"prior v2 migration backup")
+        backup = upgrade_qqq_defaults(self.path)
+        new = QQQExperiment.load(self.path)
+        self.assertEqual(backup.read_bytes(), original)
+        self.assertEqual(previous_backup.read_bytes(), b"prior v2 migration backup")
+        self.assertTrue(new.scalper.gtt_take_profit)
+        self.assertEqual(new.previous_output, old.output)
+        self.assertNotEqual(new.identity(), old.identity())
+        self.assertEqual(history, {p.relative_to(old.output): p.read_bytes() for p in old.output.rglob("*") if p.is_file()})
+        with QQQCohort(new) as cohort:
+            self.assertTrue(all(store.account()["qqq"]["qty"] == "0" for store in cohort.stores.values()))
+        updated = self.path.read_bytes()
+        self.assertIsNone(upgrade_qqq_defaults(self.path))
+        self.assertEqual(updated, self.path.read_bytes())
+
+    def test_custom_v2_config_is_not_silently_rewritten(self):
+        data = scalper_spec()
+        data["scalper"].update(model="perp_dex_scalper_v2", wait_seconds=400)
+        self.path.write_text(json.dumps(data))
+        original = self.path.read_bytes()
+        self.assertIsNone(upgrade_qqq_defaults(self.path))
+        self.assertEqual(self.path.read_bytes(), original)
 
     def test_custom_scalper_timing_tp_and_settings_are_preserved(self):
         for section, key, value in (("scalper", "wait_seconds", 400), ("strategy", "grid_count", 20),

@@ -1,7 +1,7 @@
 """Paper state machine for sequential near-book entries and independent exits.
 
 Strategy reference: your-quantguy/perp-dex-tools, commit 4679a339b8cdc9998707feeda3c5d8b84fb8681f.
-This implementation uses our public-trade Maker model, not the source's SDK/GTT execution.
+Entries use the public-trade Maker model; v3 exits model GTT arrival and resting quantity.
 """
 from dataclasses import dataclass
 from decimal import ROUND_HALF_UP
@@ -11,7 +11,7 @@ from .models import D, GridError, dec
 
 
 SOURCE_COMMIT = "4679a339b8cdc9998707feeda3c5d8b84fb8681f"
-CURRENT_MODEL = "perp_dex_scalper_v2"
+CURRENT_MODEL = "perp_dex_scalper_v3"
 
 
 @dataclass(frozen=True)
@@ -25,8 +25,12 @@ class ScalperSettings:
     def entry_distance_enabled(self):
         return self.model == "perp_dex_scalper_v1"
 
+    @property
+    def gtt_take_profit(self):
+        return self.model == "perp_dex_scalper_v3"
+
     def validate(self):
-        if self.model not in {"perp_dex_scalper_v1", CURRENT_MODEL}:
+        if self.model not in {"perp_dex_scalper_v1", "perp_dex_scalper_v2", CURRENT_MODEL}:
             raise GridError("Unknown QQQ scalper model")
         for name in ("wait_seconds", "reprice_after_seconds", "reprice_poll_seconds"):
             value = getattr(self, name)
@@ -67,7 +71,8 @@ def _consume(account, market, now, config):
         orders = sorted((o for o in account["orders"] if o["side"] == side),
                         key=lambda o: ((-1 if side == "buy" else 1) * dec(o["price"]), o["id"]))
         for order in orders:
-            if (not available or order["queue"] is None or trade["ts"] < order["active_ts"]
+            if (not available or order.get("activation_pending") or order["queue"] is None or trade["ts"] < order["active_ts"]
+                    or "rested_ts" in order and trade["ts"] <= order["rested_ts"]
                     or order["cancel_ts"] is not None and trade["ts"] >= order["cancel_ts"]):
                 continue
             limit = dec(order["price"])
@@ -89,6 +94,8 @@ def _consume(account, market, now, config):
             fill = book_fill(account, "qqq", change, limit, config.settings.lighter_fee_bps, trade["ts"],
                              "maker_entry" if side == "buy" else "maker_take_profit", slot["slot"])
             fill["maker_model"] = config.scalper.model
+            if config.scalper.gtt_take_profit:
+                fill["liquidity"] = "maker"
             fills.append(fill)
             slot["qty"] = str(dec(slot["qty"]) + change)
             if side == "buy":
@@ -125,7 +132,7 @@ def scalper_step(before, market, now, config, allow_entries):
     _finish_entries(account, now)
     # Unknown depth gets a fresh queue anchor, never a retroactive fill.
     for order in account["orders"]:
-        if order["queue"] is None:
+        if order["queue"] is None and not order.get("activation_pending"):
             price = dec(order["price"])
             depth = market["bids" if order["side"] == "buy" else "asks"]
             covered = depth and (price >= min(dec(p) for p, _ in depth) if order["side"] == "buy" else price <= max(dec(p) for p, _ in depth))
@@ -136,6 +143,10 @@ def scalper_step(before, market, now, config, allow_entries):
     if now - market["ts"] > settings.max_quote_age_seconds:
         state["status"] = _status(account, market, now, config, "market_gap", None)
         return account, fills
+    if policy.gtt_take_profit:
+        from .qqq_execution import activate_take_profits
+        fills.extend(activate_take_profits(account, market, now, config))
+        _finish_entries(account, now)
     closes = [dec(s["tp_price"]) for s in account["slots"] if not s["entry_pending"] and dec(s["qty"])]
     entry, target, gate = candidate_prices(market, closes, config)
     opening = [o for o in account["orders"] if o["side"] == "buy"]
@@ -161,7 +172,11 @@ def scalper_step(before, market, now, config, allow_entries):
             continue
         covered = sum((dec(o["remaining"]) for o in account["orders"] if o["slot"] == slot["slot"] and o["side"] == "sell"), D(0))
         if dec(slot["qty"]) > covered:
-            _order(account, slot, "sell", dec(slot["qty"]) - covered, dec(slot["tp_price"]), market, now, settings)
+            if policy.gtt_take_profit:
+                from .qqq_execution import submit_take_profit
+                slot["tp_rejection"] = submit_take_profit(account, slot, dec(slot["qty"]) - covered, market, now, settings)
+            else:
+                _order(account, slot, "sell", dec(slot["qty"]) - covered, dec(slot["tp_price"]), market, now, settings)
 
     waived = False
     if not opening and allow_entries:
@@ -175,6 +190,8 @@ def scalper_step(before, market, now, config, allow_entries):
         state["last_close_count"] = count
         if count >= settings.grid_count:
             phase = "capacity_full"
+        elif policy.gtt_take_profit and any(s.get("tp_rejection") for s in account["slots"]):
+            phase = "take_profit_pending"
         elif not credit and state["last_entry_ts"] is not None and remaining >= 0:
             phase = "cooling_down"
         elif not gate:
@@ -197,6 +214,12 @@ def scalper_step(before, market, now, config, allow_entries):
                 phase = "post_only_wait"
     if dec(account["qqq"]["qty"]) != sum((dec(s["qty"]) for s in account["slots"]), D(0)) or len(account["slots"]) > settings.grid_count:
         raise GridError("Scalper batch and inventory accounting differ")
+    if policy.gtt_take_profit:
+        for slot in account["slots"]:
+            covered = sum((dec(o["remaining"]) for o in account["orders"]
+                           if o["side"] == "sell" and o["slot"] == slot["slot"]), D(0))
+            if not 0 <= covered <= dec(slot["qty"]):
+                raise GridError("Take-profit orders exceed held inventory")
     state["status"] = _status(account, market, now, config, phase, gate, waived)
     return account, fills
 
@@ -217,4 +240,8 @@ def _status(account, market, now, config, phase, gate, waived=False):
             "take_profit_percent": config.take_profit_percent or config.grid_step_percent}
     if not config.scalper.entry_distance_enabled:
         result.update(entry_distance_enabled=False, grid_allowed=None)
+    if config.scalper.gtt_take_profit:
+        from .qqq_execution import take_profit_coverage
+        result.update(take_profit_execution="gtt_limit_v1", take_profit_blockers=take_profit_coverage(account),
+                      take_profits_in_flight=sum(bool(o.get("activation_pending")) for o in account["orders"]))
     return result

@@ -353,6 +353,22 @@ test('reference authentication state is explicit and legacy snapshots keep their
   assert.doesNotMatch(Q.referenceStatus(data).label,/Var token/);
 });
 
+test('GTT take-profit model displays execution provenance and exact uncovered reasons', () => {
+  const row = {grid_step_percent:'0.05',scalper:{model:'perp_dex_scalper_v3',phase:'take_profit_pending',take_profit_percent:'0.05',take_profit_blockers:[{slot:2,quantity:'0.01',reason:'below_min_notional'}]}};
+  assert.equal(Q.isScalper(row),true);
+  assert.equal(Q.distanceFree(row),true);
+  assert.equal(Q.strategyTitle(row),'止盈 0.05%');
+  assert.match(Q.scalperStatus(row).phase,/止盈单未挂出/);
+  assert.match(Q.scalperStatus(row).exitDetail,/批次 2：未达最小下单金额/);
+  assert.match(Q.scalperStatus(row).exitDetail,/0\.010000 QQQ/);
+  row.scalper.take_profit_blockers = [];
+  row.scalper.take_profits_in_flight = 1;
+  assert.match(Q.scalperStatus(row).exitDetail,/1 笔止盈单.*新盘口/);
+  assert.equal(Q.fillReason({maker_model:'perp_dex_scalper_v3',reason:'taker_take_profit'}),'Taker 批次止盈');
+  assert.match(Q.fillPricing({maker_model:'perp_dex_scalper_v3',reason:'taker_take_profit',quote_source_ts:100}),/GTT 限价止盈/);
+  assert.equal(Q.fillReason({maker_model:'perp_dex_scalper_v3',reason:'maker_take_profit'}),'Maker 批次止盈');
+});
+
 test('saving a token does not relabel an older quote as the new session confirmation', () => {
   const cache = {mode:'shared_indicative_v1',source_ts:100,max_age_seconds:60,available:true,authentication:'vr-token',authenticated:true};
   const data = {server_ts:106,var_session:{updated_ts:102},summary:{market:{quote_cache:cache}}};
