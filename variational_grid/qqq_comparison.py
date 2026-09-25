@@ -18,19 +18,29 @@ from .qqq_hedge import QQQConfig, QQQEngine, QQQSettings, QQQStore, digest, enco
 from .qqq_market import RequestDeferred
 from .qqq_pricing import QQQPricing, ReferenceCache, source_valid, reference_price
 from .qqq_auth import SessionUnavailable
-from .qqq_scalper import ScalperSettings
+from .qqq_scalper import SAFETY_POLICY, ScalperSettings
 
 
 def summary_record(summary):
-    return encoded({"qqq_compact": 1, "history": {"pnl": [r["total_pnl_usdc"] for r in summary["scenarios"]],
+    return encoded({"qqq_compact": 1, "history": {"names": [r["name"] for r in summary["scenarios"]],
+                    "pnl": [r["total_pnl_usdc"] for r in summary["scenarios"]],
                     "exposure": [r["signed_exposure_percent"] for r in summary["scenarios"]],
                     "net_exposure": [r["net_exposure_usdc"] for r in summary["scenarios"]], "gap": summary["market"].get("gap", False)},
                     "state": base64.b64encode(zlib.compress(encoded(summary).encode(), 3)).decode("ascii")})
 
 
 def decode_summary(raw):
-    data = json.loads(raw)
-    return json.loads(zlib.decompress(base64.b64decode(data["state"]))) if data.get("qqq_compact") == 1 else data
+    try:
+        data = json.loads(raw)
+        if not isinstance(data, dict):
+            raise ValueError("Invalid summary object")
+        if data.get("qqq_compact") == 1:
+            data = json.loads(zlib.decompress(base64.b64decode(data["state"])))
+        if not isinstance(data, dict):
+            raise ValueError("Invalid summary state")
+        return data
+    except (ValueError, TypeError, KeyError, zlib.error):
+        raise GridError("Invalid QQQ saved summary") from None
 
 
 def write_export(path, text):
@@ -136,6 +146,8 @@ class QQQFrame:
         if not math.isfinite(self.ts) or self.ts <= 0 or self.data_kind not in {"synthetic", "live_indicative"} or set(self.plans) != set(experiment.scenarios):
             raise GridError("Invalid QQQ shared observation")
         q = self.market["lighter"]
+        if "scalper_safety_policy" in q and q["scalper_safety_policy"] != SAFETY_POLICY:
+            raise GridError("Unknown QQQ scalper safety policy")
         if "take_profit_policy" in q:
             from .qqq_execution import TAKE_PROFIT_POLICY
             if q["take_profit_policy"] != TAKE_PROFIT_POLICY:
@@ -221,7 +233,8 @@ class QQQCohort(Cohort):
             from .qqq_execution import TAKE_PROFIT_POLICY
             # Version observations, not the economic identity: old pending frames
             # must recover identically across accounts before the new policy starts.
-            market = {**market, "lighter": {**market["lighter"], "take_profit_policy": TAKE_PROFIT_POLICY}}
+            market = {**market, "lighter": {**market["lighter"], "take_profit_policy": TAKE_PROFIT_POLICY,
+                                          "scalper_safety_policy": SAFETY_POLICY}}
         plans = {}
         for name, engine in self.engines.items():
             account, _ = engine.prepare(market, ts)
@@ -492,44 +505,22 @@ def read_qqq_dashboard(experiment, window):
             return result
         summary = result["summary"] = decode_summary(raw[0])
         names = [r["name"] for r in summary["scenarios"]]
-        points, segment, previous = [], 0, None
-        rows = db.execute("SELECT ts,payload FROM summaries WHERE ts>=? AND ts<=? ORDER BY ts", (summary["ts"] - WINDOWS[window], summary["ts"]))
-        for ts, raw in rows:
-            data = json.loads(raw)
-            history = data["history"] if data.get("qqq_compact") == 1 else {
-                "gap": data["market"].get("gap", False), "pnl": [r["total_pnl_usdc"] for r in data["scenarios"]],
-                "exposure": [r["signed_exposure_percent"] for r in data["scenarios"]],
-                "net_exposure": [r["net_exposure_usdc"] for r in data["scenarios"]]}
-            if previous is not None and (ts - previous > max(15, experiment.settings.poll_seconds * 3) or history["gap"]):
-                segment += 1
-            points.append({"ts": ts, "segment": segment, "pnl": [float(v) for v in history["pnl"]],
-                           "exposure": [float(v) for v in history["exposure"]],
-                           "net_exposure": [float(v) for v in history["net_exposure"]] if "net_exposure" in history else [None] * len(names)})
-            previous = ts
-        source_count = len(points)
-        if source_count > 900:
-            # Keep endpoints and extrema of every PnL/exposure series in each bucket.
-            selected = {0, source_count - 1}
-            buckets = max(1, 898 // (4 * len(names) + 2))
-            for bucket in range(buckets):
-                lo, hi = bucket * source_count // buckets, (bucket + 1) * source_count // buckets
-                selected.update((lo, hi - 1))
-                for key in ("pnl", "net_exposure" if summary["scenarios"][0].get("hedge_threshold_usdc") is not None else "exposure"):
-                    for j in range(len(names)):
-                        selected.add(min(range(lo, hi), key=lambda i: points[i][key][j]))
-                        selected.add(max(range(lo, hi), key=lambda i: points[i][key][j]))
-            points = [points[i] for i in sorted(selected)]
-        result["history"] = {"range": window, "names": names, "source_count": source_count, "points": points}
-    for name, config in experiment.scenarios.items():
-        with closing(read_db(config.state_file)) as db:
-            db.execute("BEGIN")
-            raw = db.execute("SELECT account FROM ticks WHERE ts=?", (summary["ts"],)).fetchone()
-            if not raw:
-                raise GridError("QQQ dashboard missing published account snapshot")
-            account = json.loads(raw[0])
-            result["positions"].extend({"scenario": name, **slot} for slot in account["slots"] if dec(slot["qty"]) > 0)
-            for raw, in db.execute("SELECT payload FROM fills WHERE frame_ts<=? ORDER BY id DESC LIMIT 100", (summary["ts"],)):
-                result["trades"].append({"scenario": name, **json.loads(raw)})
+        # Ledgers retain only the last two account snapshots. Capture this
+        # published point before a long history scan lets the writer prune it.
+        for name, config in experiment.scenarios.items():
+            with closing(read_db(config.state_file)) as ledger:
+                ledger.execute("BEGIN")
+                raw = ledger.execute("SELECT account FROM ticks WHERE ts=?", (summary["ts"],)).fetchone()
+                if not raw:
+                    raise GridError("QQQ dashboard missing published account snapshot")
+                account = json.loads(raw[0])
+                result["positions"].extend({"scenario": name, **slot} for slot in account["slots"] if dec(slot["qty"]) > 0)
+                for raw, in ledger.execute("SELECT payload FROM fills WHERE frame_ts<=? ORDER BY id DESC LIMIT 100", (summary["ts"],)):
+                    result["trades"].append({"scenario": name, **json.loads(raw)})
+        from .qqq_history import read_history
+        result["history"] = {"range": window, **read_history(
+            db, summary["ts"] - WINDOWS[window], summary["ts"], names,
+            experiment.settings.poll_seconds, summary["scenarios"][0].get("hedge_threshold_usdc") is not None)}
     result["trades"].sort(key=lambda r: (r["ts"], r["id"]), reverse=True)
     result["details_available"] = True
     return result

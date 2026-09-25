@@ -27,11 +27,7 @@ class ProcessLock:
 
     def __enter__(self):
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.handle = self.path.open("a+b")
-        self.handle.seek(0)
-        self.handle.write(b"0")
-        self.handle.flush()
-        self.handle.seek(0)
+        self.handle = os.fdopen(os.open(self.path, os.O_RDWR | os.O_CREAT, 0o600), "r+b")
         try:
             if os.name == "nt":
                 import msvcrt
@@ -39,6 +35,13 @@ class ProcessLock:
             else:
                 import fcntl
                 fcntl.flock(self.handle, fcntl.LOCK_EX | fcntl.LOCK_NB)
+            # Lock before touching the contents; a contender must never resize
+            # another writer's lock. Also repair old append-growing lock files.
+            if os.fstat(self.handle.fileno()).st_size != 1:
+                self.handle.seek(0)
+                self.handle.write(b"0")
+                self.handle.truncate(1)
+                self.handle.flush()
         except OSError:
             self.handle.close()
             raise GridError("Another process already owns this ledger") from None

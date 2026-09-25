@@ -10,13 +10,12 @@ import re
 import secrets
 import time
 import threading
-import urllib.request
 from urllib.parse import parse_qs, urlsplit
 
 from .comparison import Experiment, Frame, quantity_key
 from .engine import Engine
 from .models import GridError, dec, utc
-from .client import Client, NoRedirect, USER_AGENT, save_session, token_expiry
+from .client import CandidateSession, Client, USER_AGENT, save_session, token_expiry
 from .store import fill_totals
 from .reset import control_lock, read_state, request_reset
 
@@ -34,14 +33,10 @@ class SessionUpdateError(GridError):
         self.status = status
 
 
-class _SubmittedSession(Client):
+class _SubmittedSession(CandidateSession):
     """Verify a candidate in memory before replacing the protected file."""
     def __init__(self, token):
-        self._token = token
-        self.opener = urllib.request.build_opener(NoRedirect())
-
-    def session(self):
-        return self._token, USER_AGENT
+        super().__init__({"token": token, "user_agent": USER_AGENT})
 
 
 class VarSessionControl:

@@ -96,14 +96,15 @@ def activate_take_profits(account, market, now, config):
     return fills
 
 
-def take_profit_coverage(account):
+def take_profit_coverage(account, *, include_pending=False):
     """Report exact uncovered inventory, including exchange minimum failures."""
     uncovered = []
+    from .qqq_scalper import exit_quantities
+    quantities = exit_quantities(account)
     for slot in account["slots"]:
-        if slot["entry_pending"] or not dec(slot["qty"]):
+        if (slot["entry_pending"] and not include_pending) or not dec(slot["qty"]):
             continue
-        covered = sum((dec(o["remaining"]) for o in account["orders"]
-                       if o["slot"] == slot["slot"] and o["side"] == "sell"), D(0))
+        covered = quantities.get(slot["slot"], D(0))
         if dec(slot["qty"]) > covered:
             uncovered.append({"slot": slot["slot"], "quantity": str(dec(slot["qty"]) - covered),
                               "reason": slot.get("tp_rejection", "awaiting_submission")})

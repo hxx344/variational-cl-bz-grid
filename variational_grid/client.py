@@ -5,6 +5,7 @@ import os
 from pathlib import Path
 import re
 import shlex
+import tempfile
 import time
 from http.cookies import SimpleCookie
 import urllib.error
@@ -86,15 +87,25 @@ def save_session(path, data):
     stored = encode_session(data)
     path = Path(path)
     path.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
-    temporary = path.with_name(path.name + ".new")
+    temporary = None
     try:
-        # O_EXCL rejects an unexpected existing file or symlink.
-        fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        # A private, exclusive name prevents a crashed rotation from blocking
+        # all future rotations. Never remove a pre-existing temporary file.
+        fd, name = tempfile.mkstemp(prefix=path.name + ".", suffix=".new", dir=path.parent)
+        temporary = Path(name)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             json.dump(stored, handle)
+            handle.flush()
+            os.fsync(handle.fileno())
         os.replace(temporary, path)
     except OSError:
         raise GridError("Could not securely save session; check destination permissions") from None
+    finally:
+        if temporary is not None:
+            try:
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass  # A leftover owned file cannot block the next unique name.
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -180,3 +191,18 @@ class Client:
     def quote(self, symbol, qty):
         data = self.request("POST", "/quotes/indicative", body={"instrument": {"underlying": symbol, "instrument_type": "perpetual_rwa_future", "settlement_asset": "USDC", "kind": "commodity"}, "qty": str(qty)})
         return Quote.parse(symbol, qty, data)
+
+
+class CandidateSession(Client):
+    """Authenticate an in-memory candidate before touching a working session."""
+    def __init__(self, data):
+        self.data = dict(data)
+        self.opener = urllib.request.build_opener(NoRedirect())
+
+    def session(self):
+        token, agent = self.data.get("token"), self.data.get("user_agent", USER_AGENT)
+        if token_expiry(token) <= time.time() + 30:
+            raise GridError("Session expired or expiring; import a fresh browser session")
+        if not isinstance(agent, str) or len(agent) > 2048 or any(ord(c) < 32 or ord(c) > 126 for c in agent):
+            raise GridError("Invalid session user agent")
+        return token, agent

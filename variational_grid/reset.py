@@ -73,6 +73,12 @@ def backup_database(source, destination):
 def process_reset(cohort):
     """Called at a cycle boundary (and before recovery on restart). Never calls the venue."""
     experiment = cohort.experiment
+    # A long read-only history request must not pause the sampling writer when
+    # there is no reset to do. Requests arriving after this atomic-file read are
+    # handled at the next cycle boundary; busy state is rechecked under the lock.
+    state = read_state(experiment)
+    if state is None or state["status"] not in BUSY:
+        return False
     with control_lock(experiment):
         state = read_state(experiment)
         if state is None or state["status"] not in BUSY:

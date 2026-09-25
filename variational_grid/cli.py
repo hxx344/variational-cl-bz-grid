@@ -8,7 +8,7 @@ import sqlite3
 import time
 from concurrent.futures import ThreadPoolExecutor
 
-from .client import Client, USER_AGENT, import_curl, save_session, token_expiry
+from .client import CandidateSession, Client, USER_AGENT, import_curl, save_session, token_expiry
 from .engine import Engine
 from .models import Config, D, GridError, HOUR, WINDOW, Quote, dec, rolling_center, utc
 from .store import ProcessLock, Store
@@ -51,8 +51,11 @@ def init_session(args):
         data = {"token": getpass.getpass("vr-token (hidden): ").strip(), "user_agent": USER_AGENT}
     if token_expiry(data["token"]) <= time.time() + 30:
         raise GridError("Session is expired or expiring; capture a fresh session")
+    candidate = CandidateSession(data)
+    verified = candidate.check_session()
+    candidate.session()  # Network time must not allow an expiring token to replace the old one.
     save_session(config.session_file, data)
-    emit(Client(config.session_file).check_session())
+    emit(verified)
 
 
 def check_session(args):

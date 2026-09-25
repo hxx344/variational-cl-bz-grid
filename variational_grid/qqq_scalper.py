@@ -12,6 +12,7 @@ from .models import D, GridError, dec
 
 SOURCE_COMMIT = "4679a339b8cdc9998707feeda3c5d8b84fb8681f"
 CURRENT_MODEL = "perp_dex_scalper_v3"
+SAFETY_POLICY = "partial_tp_cancel_v1"
 
 
 @dataclass(frozen=True)
@@ -65,11 +66,13 @@ def _consume(account, market, now, config):
     from .qqq_hedge import book_fill, floor
     slots = {s["slot"]: s for s in account["slots"]}
     fills = []
+    ordered = {side: sorted((o for o in account["orders"] if o["side"] == side),
+                           key=lambda o: ((-1 if side == "buy" else 1) * dec(o["price"]), o["id"]))
+               for side in ("buy", "sell")}
     for trade in market["trades"]:
         side = "buy" if trade["side"] == "sell" else "sell"
         price, available = dec(trade["price"]), dec(trade["qty"])
-        orders = sorted((o for o in account["orders"] if o["side"] == side),
-                        key=lambda o: ((-1 if side == "buy" else 1) * dec(o["price"]), o["id"]))
+        orders = ordered[side]
         for order in orders:
             if (not available or order.get("activation_pending") or order["queue"] is None or trade["ts"] < order["active_ts"]
                     or "rested_ts" in order and trade["ts"] <= order["rested_ts"]
@@ -130,6 +133,15 @@ def scalper_step(before, market, now, config, allow_entries):
 
     fills = _consume(account, market, now, config)
     _finish_entries(account, now)
+    safety = policy.gtt_take_profit and market.get("scalper_safety_policy") == SAFETY_POLICY
+    stale = now - market["ts"] > settings.max_quote_age_seconds
+    if safety and (not allow_entries or stale):
+        for order in account["orders"]:
+            if order["side"] == "buy" and order["cancel_ts"] is None:
+                order["cancel_ts"] = now + settings.cancel_latency_ms / 1000
+    if safety and stale:
+        state["status"] = _status(account, market, now, config, "market_gap", None)
+        return account, fills
     # Unknown depth gets a fresh queue anchor, never a retroactive fill.
     for order in account["orders"]:
         if order["queue"] is None and not order.get("activation_pending"):
@@ -166,11 +178,13 @@ def scalper_step(before, market, now, config, allow_entries):
     else:
         phase = "entry_paused"
 
-    # Finalized partial entries and complete entries each own one independent TP.
+    # New observations also protect filled quantity while the entry remains open.
+    # Unversioned frames keep the reference's wait-for-entry-completion behavior.
+    covered_by_slot = exit_quantities(account)
     for slot in account["slots"]:
-        if slot["entry_pending"] or not dec(slot["qty"]):
+        if (slot["entry_pending"] and not safety) or not dec(slot["qty"]):
             continue
-        covered = sum((dec(o["remaining"]) for o in account["orders"] if o["slot"] == slot["slot"] and o["side"] == "sell"), D(0))
+        covered = covered_by_slot.get(slot["slot"], D(0))
         if dec(slot["qty"]) > covered:
             if policy.gtt_take_profit:
                 from .qqq_execution import submit_take_profit
@@ -180,6 +194,7 @@ def scalper_step(before, market, now, config, allow_entries):
 
     waived = False
     if not opening and allow_entries:
+        exit_slots = {o["slot"] for o in account["orders"] if o["side"] == "sell"}
         count = len(account["slots"])
         wait = cooldown_seconds(count, settings.grid_count, policy.wait_seconds)
         remaining = 0 if state["last_entry_ts"] is None else state["last_entry_ts"] + wait - now
@@ -196,7 +211,7 @@ def scalper_step(before, market, now, config, allow_entries):
             phase = "cooling_down"
         elif not gate:
             phase = "grid_blocked"
-        elif any(not any(o["side"] == "sell" and o["slot"] == s["slot"] for o in account["orders"]) for s in account["slots"]):
+        elif any(s["slot"] not in exit_slots for s in account["slots"]):
             phase = "take_profit_pending"
         elif entry <= 0 or target <= entry:
             phase = "post_only_wait"
@@ -215,13 +230,21 @@ def scalper_step(before, market, now, config, allow_entries):
     if dec(account["qqq"]["qty"]) != sum((dec(s["qty"]) for s in account["slots"]), D(0)) or len(account["slots"]) > settings.grid_count:
         raise GridError("Scalper batch and inventory accounting differ")
     if policy.gtt_take_profit:
+        covered_by_slot = exit_quantities(account)
         for slot in account["slots"]:
-            covered = sum((dec(o["remaining"]) for o in account["orders"]
-                           if o["side"] == "sell" and o["slot"] == slot["slot"]), D(0))
+            covered = covered_by_slot.get(slot["slot"], D(0))
             if not 0 <= covered <= dec(slot["qty"]):
                 raise GridError("Take-profit orders exceed held inventory")
     state["status"] = _status(account, market, now, config, phase, gate, waived)
     return account, fills
+
+
+def exit_quantities(account):
+    covered = {}
+    for order in account["orders"]:
+        if order["side"] == "sell":
+            covered[order["slot"]] = covered.get(order["slot"], D(0)) + dec(order["remaining"])
+    return covered
 
 
 def _status(account, market, now, config, phase, gate, waived=False):
@@ -242,8 +265,15 @@ def _status(account, market, now, config, phase, gate, waived=False):
         result.update(entry_distance_enabled=False, grid_allowed=None)
     if config.scalper.gtt_take_profit:
         from .qqq_execution import TAKE_PROFIT_POLICY, take_profit_coverage
-        result.update(take_profit_execution="gtt_limit_v1", take_profit_blockers=take_profit_coverage(account),
+        safety = market.get("scalper_safety_policy") == SAFETY_POLICY
+        result.update(take_profit_execution="gtt_limit_v1", take_profit_blockers=take_profit_coverage(account, include_pending=safety),
                       take_profits_in_flight=sum(bool(o.get("activation_pending")) for o in account["orders"]))
+        if safety:
+            result["partial_entry_protection"] = SAFETY_POLICY
+            covered = exit_quantities(account)
+            result["partial_entries"] = [{"slot": s["slot"], "quantity": s["qty"],
+                                          "take_profit_submitted_quantity": str(covered.get(s["slot"], D(0)))}
+                                         for s in account["slots"] if s["entry_pending"] and dec(s["qty"]) > 0]
         if market.get("take_profit_policy") == TAKE_PROFIT_POLICY:
             result.update(take_profit_execution=TAKE_PROFIT_POLICY,
                           small_take_profits=[{"slot": o["slot"], "quantity": o["remaining"], "limit": o["price"]}

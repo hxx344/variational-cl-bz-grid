@@ -76,7 +76,7 @@ class DashboardSessionTests(unittest.TestCase):
 
     def test_verification_uses_only_fixed_me_endpoint_and_candidate_cookie(self):
         opener = Opener([Response({'token': self.new})])
-        with patch('variational_grid.dashboard.urllib.request.build_opener', return_value=opener):
+        with patch('variational_grid.client.urllib.request.build_opener', return_value=opener):
             self.assertEqual(self.submit()[0], 200)
         self.assertEqual(len(opener.requests), 1)
         req = opener.requests[0]

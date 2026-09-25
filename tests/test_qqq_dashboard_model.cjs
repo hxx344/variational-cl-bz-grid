@@ -393,3 +393,12 @@ test('dust IOC is a priced exit attempt and does not masquerade as blocked entri
   assert.match(Q.fillPricing(fill),/IOC 小额限价止盈/);
   assert.doesNotMatch(Q.fillPricing(fill),/GTT/);
 });
+
+test('partial entry shows submitted protection and pending arrival independently', () => {
+  const row = {scalper:{model:'perp_dex_scalper_v3',phase:'awaiting_fill',partial_entries:[{slot:1,quantity:'2',take_profit_submitted_quantity:'2'}],take_profits_in_flight:1}};
+  const status = Q.scalperStatus(row);
+  assert.match(status.exitDetail,/部分成交 2\.000000 QQQ/);
+  assert.match(status.exitDetail,/已提交止盈 2\.000000 QQQ/);
+  assert.match(status.exitDetail,/1 笔止盈单.*新盘口/);
+  assert.equal(status.phase,'开仓单等待成交');
+});

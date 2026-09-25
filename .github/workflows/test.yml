@@ -15,6 +15,7 @@ jobs:
         with:
           python-version: ${{ matrix.python }}
       - run: python -m unittest discover -s tests -v
+      - run: python -m variational_grid.execution_drill
       - run: node --test tests/test_dashboard_model.cjs tests/test_inventory_dashboard_model.cjs tests/test_qqq_dashboard_model.cjs tests/test_hub_bridge.cjs
       - run: node --check variational_grid/web/app.js
       - run: node --check variational_grid/web/inventory.js

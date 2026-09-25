@@ -431,7 +431,8 @@ Authenticated /quotes/indicative supplies quantity-specific indicative prices.
             if type(row["is_close_only_mode"]) is not bool or row["market_status"] not in {"open", "closed"}:
                 raise GridError("US100 swap market status changed")
             # This public endpoint is explicitly CDN cached for 60 seconds.
-            # Its price is never used to execute; quotes still require <=10s.
+            # Its price is never used to execute; quote age is checked against
+            # this client's configured pricing mode independently of metadata.
             if source_ts is None or not _fresh(source_ts, received, 120):
                 raise GridError("US100 swap metadata is stale")
             sessions = row["trading_sessions"]
