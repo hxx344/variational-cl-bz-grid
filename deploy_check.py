@@ -45,7 +45,7 @@ def main():
             Experiment.load(examples / name)
 
     for name in ("index.html", "app.js", "model.js", "styles.css", "inventory.html", "inventory.js", "inventory.css",
-                 "qqq.html", "qqq.js", "qqq.css"):
+                 "qqq.html", "qqq.js", "qqq.css", "var-session.js"):
         if not (root / "variational_grid/web" / name).read_text(encoding="utf-8").strip():
             raise RuntimeError(f"Empty dashboard asset: {name}")
     with closing(sqlite3.connect(":memory:")) as db:

@@ -382,6 +382,8 @@ curl -fsSL https://raw.githubusercontent.com/hxx344/variational-cl-bz-grid/main/
 
 配置在 `/etc/variational-grid/qqq-hedge.json`，首次安装默认数据目录 `/var/lib/variational-grid/qqq-hedge-scalper-v2/`。识别到默认 v1 剥头皮三组，或历史默认九组/三组固定锚点配置时，安装器备份原配置为 `qqq-hedge.before-scalper-v2.json`，将原目录名加上 `-scalper-v2` 后开始无距离门槛的新三组模拟。旧配置、旧持仓与损益账本、已有 v1 备份和 CL/BZ 数据均原样保留；新一轮从空仓与零统计开始，仅继承有效鉴权报价缓存和限流冷却。自定义时序、TP、组合或经济参数不会被自动覆盖。重复执行采用增量更新，未变化时复用代码和验证结果，不重复重启；服务器仅执行快速离线部署检查，完整测试在 CI 执行。
 
+QQQ 监控页右上角的 **更新 Var token** 可直接粘贴新令牌。页面使用遮挡输入，服务先向固定 `/api/me` 验证，成功才原子替换受保护会话文件；失败保留原会话。保存后策略自动读取，无需重启或重置模拟。输入不会写入浏览器存储、URL 或日志。此操作仍通过 localhost / SSH 转发访问；服务仅接受同源及页面随机校验令牌，不接受自定义路径或接口地址。每次手动提交最多一次会话验证，不随页面刷新询问 Var。
+
 网页沿用服务 `variational-grid-web.service`，监听服务器 `127.0.0.1:9876`。在自己电脑保持SSH转发：
 
 ```bash

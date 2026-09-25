@@ -130,9 +130,11 @@
     const cache = data?.summary?.market?.quote_cache;
     if (!cache || cache.mode !== 'shared_indicative_v1') return null;
     const age = M.finite(cache.source_ts) && M.finite(data.server_ts) ? Math.max(0, Number(data.server_ts) + Math.max(0, elapsedSeconds) - Number(cache.source_ts)) : null;
-    const usable = cache.available === true && age !== null && age <= Number(cache.max_age_seconds);
+    const waitingSession = cache.authentication === 'vr-token' && M.finite(data?.var_session?.updated_ts)
+      && (!M.finite(cache.source_ts) || Number(cache.source_ts) <= Number(data.var_session.updated_ts) + 2);
+    const usable = !waitingSession && cache.available === true && age !== null && age <= Number(cache.max_age_seconds);
     const label = age === null ? '等待首份参考报价' : !usable ? `参考价不可用 · 报价已有 ${Math.floor(age)} 秒` : `${cache.cache_used ? '缓存估算' : '共享参考价估算'} · 报价已有 ${Math.floor(age)} 秒`;
-    const auth = cache.authentication === 'vr-token' ? (cache.authenticated ? 'Var token 已验证' : 'Var token 未就绪') : '';
+    const auth = waitingSession ? '等待新 token 报价' : cache.authentication === 'vr-token' ? (cache.authenticated ? 'Var token 已验证' : 'Var token 未就绪') : '';
     return {age, usable, label:auth ? `${auth} · ${label}` : label, limit:cache.max_age_seconds, error:cache.refresh_error || ''};
   }
   function fillPricing(row) {

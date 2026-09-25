@@ -4,12 +4,12 @@
   <meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
   <meta name="color-scheme" content="light"><title>QQQ / US100 模拟监控</title>
   <link rel="icon" href="data:,"><link rel="stylesheet" href="/qqq.css">
-  <script defer src="/model.js"></script><script defer src="/qqq.js"></script>
+  <script defer src="/model.js"></script><script defer src="/qqq.js"></script><script defer src="/var-session.js"></script>
 </head>
 <body>
 <a class="skip" href="#main">跳到监控内容</a>
 <main id="main">
-  <header class="topbar"><div><span class="eyebrow">LIGHTER × VARIATIONAL · PAPER LAB</span><h1 id="page-title">QQQ / US100 模拟监控</h1><p id="strategy-description">Lighter QQQ 做多，Variational US100 做空对冲。</p></div><div class="actions"><span id="status" class="status" role="status">连接中</span><button id="refresh" class="button">刷新</button><button id="reset" class="button" disabled>重置模拟</button></div></header>
+  <header class="topbar"><div><span class="eyebrow">LIGHTER × VARIATIONAL · PAPER LAB</span><h1 id="page-title">QQQ / US100 模拟监控</h1><p id="strategy-description">Lighter QQQ 做多，Variational US100 做空对冲。</p></div><div class="actions"><span id="status" class="status" role="status">连接中</span><button id="refresh" class="button">刷新</button><button id="var-session-open" class="button">更新 Var token</button><button id="reset" class="button" disabled>重置模拟</button></div></header>
   <div class="basis-note"><strong id="data-kind">模拟交易 · 等待行情</strong><span>公共成交队列模拟 Maker 成交 · US100 使用 Var token 鉴权指示性报价 · 收益未计资金费、隔夜费与股息调整</span></div>
   <div id="notice" class="notice" role="status" hidden></div><div id="reset-message" class="notice" role="status" hidden></div>
   <section class="market-strip" aria-label="最新行情"><div><span>Lighter · QQQ 盘口中价</span><strong id="qqq-mark">—</strong><small id="qqq-spread">买 / 卖 —</small><small id="qqq-source-time">行情时间 —</small></div><div><span>Variational · US100 标记价</span><strong id="us100-mark">—</strong><small id="us100-spread">买 / 卖 —</small><small id="us100-source-time">报价时间 —</small></div><div class="market-state"><span>行情状态</span><strong id="market-status">等待行情</strong><small id="freshness">等待第一份有效采样</small></div></section>
@@ -26,6 +26,18 @@
   <details class="method"><summary>成交模型、对冲定义与数据口径</summary><div><p>新一轮 Lighter QQQ 只做多剥头皮：每次仅保留一张近盘口开仓单，每批名义金额默认 1,000 USDC，最多占用 30 批。开仓完全成交，或部分成交后完成撤单，再为该批已成交数量挂独立止盈（TP）。v2 的三个独立账户分别采用 0.05%、0.1%、0.2% 止盈目标，不设新开仓价格距离门槛。历史 v1 保留原距离门槛，旧固定网格账本也按原规则展示；当前模型与参数以参数页为准。</p><p>v2 取消距离资格检查；历史 v1 的条件仍为：最小已有 TP ÷ [最优卖价 × (1 + TP%)] &gt; 1 + 间距%；没有已有 TP 时通过。默认基础等待 450 秒，待止盈批数为 0–4、5–9、10–19、20–29 时，分别等待 112.5、225、450、900 秒。首次可立即开仓；止盈后下一次资格检查可免冷却；仍检查行情、容量、止盈覆盖与 Maker 挂单条件，满 30 批停止新开仓。卡片的冷却进度按当前等待档位计算，正常运行时每秒推算；行情过期、服务停止或页面断连时恢复末次采样值并暂停推算。100%仅表示冷却已到，实际开仓仍需下一次采样确认其他条件；已有开仓单时显示处理中。</p><p>开仓取盘口中价与最小已有 TP 减一 tick 中的较小值，按 tick 四舍五入，并限制在最优卖价减一 tick 以内；TP 按本批入场价格乘以止盈系数，再向下取 tick。开仓单默认挂出 20 秒后允许改价，每 5 秒检查，实际成交、撤单与改价流程按采样处理。策略参考 perp-dex-tools；原版 Lighter 使用 GTT 限价单，本地保留严格 Maker 队列模拟，不模拟吃单。公共逐笔成交与保守队列不保证真实队列位置，仅触及挂单价格不等于已成交。</p><p>Variational US100 空头按美元名义金额 β = 1 对冲。净敞口 = β × QQQ 有符号数量 × QQQ 盘口中价 + US100 有符号数量 × US100 标记价。总敞口 = β × QQQ 名义金额绝对值 + US100 名义金额绝对值。实际敞口比例 = |净敞口| ÷ 总敞口，两腿均为空仓时为 0%。历史图保留净敞口方向，正值为净多，负值为净空；默认净敞口绝对值超过 3,000 USDC 时触发，调回同方向 1,500 USDC；QQQ 归零也遵循该规则，可能保留阈值内的 US100 空头。旧百分比实验仍按原敞口比例计算。两个标的的价格变化仍可能产生基差损益。</p><p>当前 US100 参考价通过 vr-token 鉴权获取；会话缺失、过期或被拒绝时暂停新开仓与模拟对冲，不回退公共报价。重启或更换 token 后先验证一次有效报价，旧公共缓存停用。新实验的 US100 模拟价格使用缓存参考中价，加减 0.0015% 半点差，无额外滑点。3 秒内直接复用，超过 3 秒尝试刷新，失败最多使用 60 秒缓存；页面显示源报价年龄。受市场状态和数量步长影响，可能保留实际残差或待对冲状态。成交记录和收益均为模拟结果，不是交易所账户成交。</p><p>两腿净损益及组合总损益以模拟账本为准，已反映账本手续费，手续费不再次从净收益扣除。未计资金费、隔夜费与股息调整。QQQ 与 US100 成交量单位不同，不合并为一个数量；两腿成交额均以 USDC 展示。曲线窗口只改变历史展示，不改变自本轮开始的累计指标。历史缺口断线显示，降采样保留各序列极值；合成行情演示会明确标注。</p></div></details>
   <footer><span>仅模拟 · 所有时间均为北京时间（UTC+8）</span><span>QQQ LONG / US100 SHORT · β 可配置</span></footer>
   <noscript><p class="notice">本页需要启用 JavaScript 才能读取模拟账本。</p></noscript>
+  <dialog id="var-session-dialog" aria-labelledby="var-session-title">
+    <form id="var-session-form" autocomplete="off">
+      <h2 id="var-session-title">更新 Var token</h2>
+      <p>粘贴已登录 Variational 的 vr-token 值。验证成功后保存，策略自动读取新会话。</p>
+      <p id="var-session-state" class="session-state">正在读取会话状态…</p>
+      <label for="var-session-input">新的 vr-token</label>
+      <input id="var-session-input" type="password" autocomplete="new-password" autocapitalize="off" spellcheck="false" maxlength="8192" required aria-describedby="var-session-help" />
+      <p id="var-session-help" class="session-help">只粘贴 token 值，无需钱包私钥。不会重置仓位或损益。</p>
+      <p id="var-session-result" class="session-result" role="status" aria-live="polite" hidden></p>
+      <div class="dialog-actions"><button id="var-session-cancel" class="button" type="button">取消</button><button id="var-session-save" class="button primary" type="submit" disabled>验证并保存</button></div>
+    </form>
+  </dialog>
   <dialog id="reset-dialog" aria-labelledby="reset-title"><h2 id="reset-title">归档并重置本轮模拟账户</h2><p>旧账本先归档，随后重新开始全部账户的开仓、对冲仓位、损益和成交统计。参数保留；重置不产生模拟平仓成交。</p><div class="dialog-actions"><button id="reset-cancel" class="button">取消</button><button id="reset-confirm" class="button primary">归档并重新开始</button></div></dialog>
 </main>
 </body></html>

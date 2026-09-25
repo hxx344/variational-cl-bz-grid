@@ -352,3 +352,13 @@ test('reference authentication state is explicit and legacy snapshots keep their
   delete quote_cache.authentication;
   assert.doesNotMatch(Q.referenceStatus(data).label,/Var token/);
 });
+
+test('saving a token does not relabel an older quote as the new session confirmation', () => {
+  const cache = {mode:'shared_indicative_v1',source_ts:100,max_age_seconds:60,available:true,authentication:'vr-token',authenticated:true};
+  const data = {server_ts:106,var_session:{updated_ts:102},summary:{market:{quote_cache:cache}}};
+  assert.match(Q.referenceStatus(data).label,/等待新 token 报价/);
+  assert.equal(Q.referenceStatus(data).usable,false);
+  cache.source_ts = 105;
+  assert.equal(Q.referenceStatus(data).usable,true);
+  assert.match(Q.referenceStatus(data).label,/Var token 已验证/);
+});

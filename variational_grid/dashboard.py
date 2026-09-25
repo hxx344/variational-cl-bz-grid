@@ -1,4 +1,4 @@
-"""Loopback paper monitor with queued resets; never reads a login token or calls the venue."""
+"""Loopback paper monitor, queued resets and protected Var session replacement."""
 from contextlib import closing
 import base64
 import hashlib
@@ -9,11 +9,14 @@ import sqlite3
 import re
 import secrets
 import time
+import threading
+import urllib.request
 from urllib.parse import parse_qs, urlsplit
 
 from .comparison import Experiment, Frame, quantity_key
 from .engine import Engine
-from .models import GridError, dec
+from .models import GridError, dec, utc
+from .client import Client, NoRedirect, USER_AGENT, save_session, token_expiry
 from .store import fill_totals
 from .reset import control_lock, read_state, request_reset
 
@@ -22,6 +25,70 @@ ASSETS = {"/": ("index.html", "text/html; charset=utf-8"),
           "/app.js": ("app.js", "text/javascript; charset=utf-8"),
           "/model.js": ("model.js", "text/javascript; charset=utf-8"),
           "/styles.css": ("styles.css", "text/css; charset=utf-8")}
+
+
+class SessionUpdateError(GridError):
+    def __init__(self, status, message):
+        super().__init__(message)
+        self.status = status
+
+
+class _SubmittedSession(Client):
+    """Verify a candidate in memory before replacing the protected file."""
+    def __init__(self, token):
+        self._token = token
+        self.opener = urllib.request.build_opener(NoRedirect())
+
+    def session(self):
+        return self._token, USER_AGENT
+
+
+class VarSessionControl:
+    def __init__(self, experiment):
+        self.path = getattr(getattr(experiment, "base", None), "session_file", None) if getattr(experiment, "kind", None) == "qqq_hedge" else None
+        self.lock = threading.Lock()
+        self.retry_at = 0.0
+
+    def status(self):
+        result = {"enabled": bool(self.path), "state": "unavailable", "expires_utc": None, "updated_ts": None}
+        if self.path:
+            try:
+                token, _ = Client(self.path).session()
+                result.update(state="stored", expires_utc=utc(token_expiry(token)), updated_ts=Path(self.path).stat().st_mtime)
+            except (GridError, OSError):
+                pass
+        return result
+
+    def update(self, body):
+        if not self.path:
+            raise SessionUpdateError(405, "当前页面不支持更新 Var token")
+        try:
+            if not isinstance(body, dict) or set(body) != {"token"} or not isinstance(body["token"], str):
+                raise ValueError()
+            token = body["token"].strip()
+            if not 0 < len(token) <= 8192 or token_expiry(token) <= time.time() + 30:
+                raise ValueError()
+        except (GridError, ValueError):
+            raise SessionUpdateError(400, "请输入完整、未过期的 vr-token 值；原会话未修改") from None
+        if not self.lock.acquire(blocking=False):
+            raise SessionUpdateError(409, "另一份 token 正在验证，请稍后再试")
+        try:
+            if time.monotonic() < self.retry_at:
+                raise SessionUpdateError(429, "提交过于频繁，请等 10 秒再试；原会话未修改")
+            self.retry_at = time.monotonic() + 10
+            try:
+                _SubmittedSession(token).check_session()  # Fixed GET /api/me, no orders.
+                if token_expiry(token) <= time.time() + 30:
+                    raise GridError("Expiring candidate")
+            except GridError:
+                raise SessionUpdateError(422, "Var 未确认新会话，请检查 token 或稍后重试；原会话未修改") from None
+            try:
+                save_session(self.path, {"token": token, "user_agent": USER_AGENT})
+            except GridError:
+                raise SessionUpdateError(503, "会话保存失败，请检查服务写入权限；原会话未修改") from None
+            return self.status()
+        finally:
+            self.lock.release()
 
 
 def read_db(path):
@@ -163,8 +230,11 @@ def make_server(experiment, port=9876):
         routes["/"] = ("qqq.html", "text/html; charset=utf-8")
         routes["/qqq.js"] = ("qqq.js", "text/javascript; charset=utf-8")
         routes["/qqq.css"] = ("qqq.css", "text/css; charset=utf-8")
+        routes["/var-session.js"] = ("var-session.js", "text/javascript; charset=utf-8")
     routes["/index.html"] = routes["/"]
     reset_token = secrets.token_urlsafe(32)
+    session_token = secrets.token_urlsafe(32)
+    session_control = VarSessionControl(experiment)
 
     class Handler(BaseHTTPRequestHandler):
         server_version = "GridMonitor"
@@ -212,8 +282,13 @@ def make_server(experiment, port=9876):
                         return self.reply(400, b"Invalid history window", head=head)
                     data = read_dashboard(experiment, window)
                     data["reset_token"] = reset_token
+                    if session_control.path:
+                        data["var_session"] = session_control.status()
                     payload = json.dumps(data, ensure_ascii=False).encode()
                     return self.reply(200, payload, "application/json; charset=utf-8", head)
+                if parsed.path == "/api/var-session" and not parsed.query:
+                    data = {**session_control.status(), "csrf_token": session_token}
+                    return self.reply(200, json.dumps(data).encode(), "application/json", head)
                 if parsed.path == "/report":
                     # HTML parsers normalize newlines before checking inline CSP hashes.
                     page = (experiment.output / "public/index.html").read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
@@ -223,6 +298,8 @@ def make_server(experiment, port=9876):
                 return self.reply(503, b'{"error":"Dashboard data temporarily unavailable"}', "application/json", head)
 
         def do_POST(self):
+            if self.path == "/api/var-session":
+                return self.update_session()
             if self.path != "/api/reset":
                 return self.reply(405, b"Unsupported operation")
             host = self.headers.get("Host", "")
@@ -254,6 +331,36 @@ def make_server(experiment, port=9876):
                 self.reply(400, b"Invalid reset request")
             except (OSError, sqlite3.Error):
                 self.reply(503, b'{"error":"Reset request could not be saved"}', "application/json")
+
+        def update_session(self):
+            host = self.headers.get("Host", "")
+            try:
+                parsed = urlsplit("http://" + host)
+                valid_host = (parsed.hostname in {"localhost", "127.0.0.1"} and not parsed.username
+                              and not parsed.password and not parsed.path and not parsed.query and not parsed.fragment)
+                parsed.port  # Reject malformed port values, too.
+            except ValueError:
+                valid_host = False
+            if (not valid_host or self.headers.get("Origin") != "http://" + host
+                    or self.headers.get("Sec-Fetch-Site") == "cross-site"
+                    or not secrets.compare_digest(self.headers.get("X-Session-Token", "").encode(), session_token.encode())):
+                return self.reply(403, b'{"error":"Same-origin session request required"}', "application/json")
+            if self.headers.get("Content-Type") != "application/json" or self.headers.get("Transfer-Encoding"):
+                return self.reply(400, b'{"error":"JSON request required"}', "application/json")
+            try:
+                length = int(self.headers.get("Content-Length", "0"))
+                if not 0 < length <= 9000:
+                    raise ValueError()
+                self.connection.settimeout(5)
+                body = json.loads(self.rfile.read(length))
+                state = session_control.update(body)
+                self.reply(200, json.dumps({"session": state}, ensure_ascii=False).encode(), "application/json")
+            except SessionUpdateError as error:
+                self.reply(error.status, json.dumps({"error": str(error)}, ensure_ascii=False).encode(), "application/json")
+            except (ValueError, TypeError):
+                self.reply(400, b'{"error":"Invalid session request"}', "application/json")
+            except OSError:
+                self.reply(503, b'{"error":"Session request unavailable"}', "application/json")
 
     server = ThreadingHTTPServer(("127.0.0.1", port), Handler)
     server.daemon_threads = True
