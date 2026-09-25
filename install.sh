@@ -22,7 +22,7 @@ Unchanged dependencies, validated code and running services are reused.
   --single   Start one grid using config.json.
   --cleanup  Reclaim obsolete deployments without downloading or restarting.
   --help     Show this help without installing anything.
-CL/BZ modes ask for vr-token with hidden input; QQQ hedge uses public market data.
+All modes reuse a saved vr-token or ask for hidden input; Lighter data stays public.
 No wallet key is needed.
 HELP
 }
