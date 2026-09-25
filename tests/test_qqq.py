@@ -15,7 +15,8 @@ from variational_grid.models import D, Config, GridError
 from variational_grid.qqq_hedge import QQQConfig, QQQSettings, book_fill, exposure, hedge_target, initial_account, maker_step
 from variational_grid.qqq_comparison import QQQCohort, QQQExperiment, QQQFrame, QQQMarketFeed, read_qqq_dashboard
 from variational_grid.reset import process_reset, read_state, request_reset
-from variational_grid.qqq_market import LighterClient, VarSwapClient, RequestDeferred
+from variational_grid.qqq_market import LighterClient, RequestDeferred
+from test_qqq_market import VarSwapClient
 from variational_grid.qqq_pricing import QQQPricing
 
 
@@ -55,7 +56,7 @@ class BudgetedVar:
         return quote(self.now[0])
 
     def quote(self, qty):
-        self.transport.request("POST", "/api/quotes/simple", body={"qty": str(qty)})
+        self.transport.request("POST", "/api/quotes/indicative", body={"qty": str(qty)})
         return quote(self.now[0], qty)
 
 

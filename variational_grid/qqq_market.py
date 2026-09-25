@@ -18,6 +18,7 @@ import urllib.request
 
 from .client import NoRedirect, ORIGIN, USER_AGENT
 from .models import GridError, timestamp
+from .qqq_auth import VarSession
 
 
 LIGHTER_ORIGIN = "https://mainnet.zklighter.elliot.ai"
@@ -31,9 +32,10 @@ SOURCE_URLS = {
     "lighter_trades": LIGHTER_ORIGIN + "/api/v1/recentTrades?market_id=129&limit=100",
     "lighter_schema": "https://github.com/elliottech/lighter-python/blob/main/lighter/models/trade.py",
     "var_market": ORIGIN + "/api/metadata/supported_assets?cex_asset=US100S",
-    "var_quotes": ORIGIN + "/api/quotes/simple",
+    "var_quotes": ORIGIN + "/api/quotes/indicative",
     "var_ui": ORIGIN + "/swap/US100S",
 }
+VAR_QUOTE_SOURCE = "variational_authenticated_indicative"
 
 
 def _number(value, *, zero=False):
@@ -87,8 +89,12 @@ def retry_delay(header, now, fallback):
 
 
 class _Transport:
-    def __init__(self, origin, allowed, opener=None, clock=None):
+    def __init__(self, origin, allowed, opener=None, clock=None, *, session=None):
+        if session is not None and (origin != ORIGIN or not allowed <= {
+                ("GET", "/api/metadata/supported_assets"), ("POST", "/api/quotes/indicative")}):
+            raise GridError("Invalid authenticated market destination")
         self.origin = origin
+        self.session = session
         self.allowed = allowed
         self.opener = opener or urllib.request.build_opener(NoRedirect())
         self.clock = clock or time.time
@@ -125,6 +131,20 @@ class _Transport:
     def restore(self, state):
         if not isinstance(state, dict) or state.get("venue") != self.venue:
             raise GridError("Invalid saved market cooldown")
+        if self.session is not None:
+            # Preserve the public route's existing cooldown when upgrading.
+            old, new = "/api/quotes/simple", "/api/quotes/indicative"
+            state = dict(state)
+            if state.get("path") == old:
+                state["path"] = new
+            if isinstance(state.get("failures"), dict):
+                state["failures"] = dict(state["failures"])
+                if old in state["failures"]:
+                    count = state["failures"].pop(old)
+                    existing = state["failures"].get(new, 0)
+                    if any(type(n) is not int or not 0 <= n <= 20 for n in (count, existing)):
+                        raise GridError("Invalid saved cooldown counters")
+                    state["failures"][new] = max(count, existing)
         for key in ("retry_at", "next_quote_at", "quote_interval"):
             value = state.get(key)
             if isinstance(value, bool) or not isinstance(value, (int, float)) or not math.isfinite(value) or value < 0:
@@ -148,6 +168,7 @@ class _Transport:
     def _request(self, method, path, *, query=None, body=None, probe=False):
         if (method, path) not in self.allowed:
             raise GridError("Endpoint is not permitted by the QQQ paper market client")
+        credentials = self.session.read() if self.session else None
         self.check_cooldown()
         if method == "POST":
             now = self.clock()
@@ -161,6 +182,9 @@ class _Transport:
                    "Cache-Control": "no-cache"}
         if self.origin == ORIGIN:
             headers["Referer"] = ORIGIN + "/"
+        if credentials:
+            headers["Cookie"] = "vr-token=" + credentials[0]
+            headers["User-Agent"] = credentials[1]
         payload = None
         if body is not None:
             payload = json.dumps(body).encode("utf-8")
@@ -200,6 +224,8 @@ class _Transport:
             code = error.code
             retry = error.headers.get("Retry-After") if error.headers else None
             error.close()
+            if code in (401, 403) and self.session:
+                self.session.reject()
             if code == 429:
                 now = self.clock()
                 count = self.failures[path] = min(20, self.failures.get(path, 0) + 1)
@@ -372,20 +398,22 @@ class VarSwapClient:
     """US100S display quotes in index units (not CME $20 contracts).
 
 The venue frontend computes dollar notional as quantity times quoted price.
-Public /quotes/simple supplies quantity-specific indicative bid/ask prices.
-    No session or account credentials are read.
+Authenticated /quotes/indicative supplies quantity-specific indicative prices.
+    This client cannot place or accept an order.
 """
 
-    def __init__(self, *, opener=None, clock=None, max_age_seconds=10):
+    def __init__(self, *, session_file=None, opener=None, clock=None, max_age_seconds=10):
+        self.session = VarSession(session_file)
         self.transport = _Transport(ORIGIN, {
-            ("GET", "/api/metadata/supported_assets"), ("POST", "/api/quotes/simple"),
-        }, opener, clock)
+            ("GET", "/api/metadata/supported_assets"), ("POST", "/api/quotes/indicative"),
+        }, opener, clock, session=self.session)
         self.max_age_seconds = max_age_seconds
         self._market = None
         self._metadata_checked = None
         self._last_quote = None
 
     def _metadata(self):
+        self.session.read()
         self.transport.check_cooldown()
         now = self.transport.clock()
         if (self._market is not None and self._metadata_checked is not None and 0 <= now - self._metadata_checked < 30
@@ -435,7 +463,7 @@ Public /quotes/simple supplies quantity-specific indicative bid/ask prices.
         # Any fresh, validated US100 quote can provide the common mark/limits.
         # Preserve its original time; actual simulated hedge fills still require
         # a newly requested exact-quantity quote in that frame.
-        if self._last_quote and _fresh(self._last_quote["ts"], self.transport.clock(), min(9, self.max_age_seconds)):
+        if self.session.cache_allowed() and self._last_quote and _fresh(self._last_quote["ts"], self.transport.clock(), min(9, self.max_age_seconds)):
             return {**self._last_quote, **{k: market[k] for k in ("market_open", "closes_at", "close_only")},
                     "is_probe": True, "probe_qty": self._last_quote["qty"]}
         quote = self.quote("0.01", _probe=True)
@@ -446,7 +474,7 @@ Public /quotes/simple supplies quantity-specific indicative bid/ask prices.
         market = self._metadata()
         if not market["market_open"] or (market["closes_at"] is not None and self.transport.clock() >= market["closes_at"]):
             raise GridError("US100 swap market is closed")
-        path = "/api/quotes/simple"
+        path = "/api/quotes/indicative"
         data, received, _ = self.transport.request("POST", path,
             body={"instrument": dict(VAR_INSTRUMENT), "qty": _text(quantity)}, probe=_probe)
         try:
@@ -478,10 +506,11 @@ Public /quotes/simple supplies quantity-specific indicative bid/ask prices.
                 raise GridError("US100 requested quantity is outside indicative limits")
             result = {**market, "bid": _text(bid), "ask": _text(ask), "mark": _text(mark),
                     "qty": _text(quantity), "ts": quote_ts, "source_ts": quote_ts, "received_ts": received,
-                    "source_time_kind": "exchange_quote_timestamp", "source": "variational_" + path.rsplit("/", 1)[1] + "_indicative",
+                    "source_time_kind": "exchange_quote_timestamp", "source": VAR_QUOTE_SOURCE,
                     "qty_limits": limits, "min_qty": _text(minimum), "max_qty": _text(maximum),
                     "size_step": _text(step), "ready": True, "reason": "", "is_probe": False}
             self._last_quote = result
+            self.session.accept()
             return result
         except (KeyError, TypeError, AttributeError, InvalidOperation):
             raise GridError("US100 indicative quote schema changed") from None

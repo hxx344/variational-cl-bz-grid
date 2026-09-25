@@ -340,6 +340,8 @@ class QQQEngine:
                     shared = "pricing_policy" in frame.market
                     fill = book_fill(account, "us100", change, price, settings.var_fee_bps,
                                      frame.ts if shared else quote["ts"], "delta_hedge")
+                    if "source" in quote:
+                        fill["quote_source"] = quote["source"]
                     if shared:
                         age = max(0, frame.ts - quote["ts"])
                         fill.update(pricing_mode=quote["pricing_mode"], quote_ts=quote["ts"], source_qty=quote["source_qty"],

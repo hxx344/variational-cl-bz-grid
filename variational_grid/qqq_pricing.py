@@ -1,10 +1,10 @@
-"""Persisted public reference prices for explicitly estimated paper fills."""
+"""Persisted authenticated reference prices for estimated paper fills."""
 from dataclasses import asdict, dataclass
 import json
 import math
 
 from .models import GridError, dec
-from .qqq_market import VAR_SYMBOL
+from .qqq_market import VAR_SYMBOL, VAR_QUOTE_SOURCE
 
 
 @dataclass(frozen=True)
@@ -44,7 +44,7 @@ def reference_price(quote, policy):
 
 
 def source_valid(quote, market):
-    """Validate disk data as strictly as the normalized public source contract."""
+    """Validate normalized prices, including historical journal frames."""
     try:
         for row in (quote, market):
             if (row["symbol"], row["instrument_type"], row["multiplier"], row["quantity_unit"]) != (VAR_SYMBOL, "swap", "1", "index_unit"):
@@ -82,16 +82,20 @@ class ReferenceCache:
                 data = json.loads(raw)
                 if data["version"] != 1 or not source_valid(data["quote"], data["market"]):
                     raise ValueError()
+                if data["quote"].get("source") != VAR_QUOTE_SOURCE:
+                    raise ValueError()
                 self.quote = data["quote"]
                 client._market = data["market"]
                 client._metadata_checked = None
                 self._saved = raw if source == path else None
             except (OSError, ValueError, KeyError, TypeError):
-                self.restore_error = "报价缓存损坏，等待公共行情刷新"
+                self.restore_error = "旧公共报价或无效缓存已停用，等待 Var token 鉴权报价"
 
     def usable(self, now):
+        if not self.client.session.cache_allowed():
+            return None
         quote, market = self.quote, self.client._market
-        if not quote or not market or not source_valid(quote, market):
+        if not quote or quote.get("source") != VAR_QUOTE_SOURCE or not market or not source_valid(quote, market):
             return None
         if not (-2 <= now - quote["ts"] <= self.policy.max_age_seconds and -2 <= now - market["metadata_ts"] <= 120):
             return None
@@ -124,11 +128,15 @@ class ReferenceCache:
                 self.save()  # Also persist an observed market closure after a failed quote.
         now = self.client.transport.clock()
         current = self.usable(now)
-        self.save()  # Copy inherited public state only after the new cohort exists.
+        self.save()  # Copy inherited state only after the new cohort exists.
         status = {**asdict(self.policy), "source_ts": self.quote["ts"] if self.quote else None,
                   "source_qty": self.quote["qty"] if self.quote else None, "cache_used": cache_used,
                   "age_seconds": max(0, now - self.quote["ts"]) if self.quote else None,
-                  "available": current is not None, "refresh_error": error}
-        if current is None and not error:
+                  "available": current is not None, "refresh_error": error,
+                  "authentication": "vr-token", "authenticated": self.client.session.confirmed,
+                  "source": self.quote.get("source") if self.quote else None}
+        if not self.client.session.confirmed and not error:
+            status["refresh_error"] = self.client.session.error or error
+        if current is None and not status["refresh_error"]:
             status["refresh_error"] = "US100 缓存过期或市场状态不可用，等待有效报价"
         return current, status

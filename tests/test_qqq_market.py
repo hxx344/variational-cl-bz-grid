@@ -7,7 +7,13 @@ from unittest.mock import patch
 import urllib.error
 
 from variational_grid.models import GridError
-from variational_grid.qqq_market import LighterClient, VarSwapClient, VAR_INSTRUMENT, RequestDeferred, retry_delay
+from variational_grid.qqq_market import LighterClient, VarSwapClient as RealVarSwapClient, VAR_INSTRUMENT, RequestDeferred, retry_delay
+
+
+def VarSwapClient(**kwargs):
+    client = RealVarSwapClient(session_file="fixture-session", **kwargs)
+    client.session.client.session = lambda: ("fixture.token.signature", "fixture-agent")
+    return client
 
 
 NOW = 1790269000
@@ -284,19 +290,18 @@ class VarSwapMarketTests(unittest.TestCase):
         client.market()
         self.assertEqual([r.method for r in opener.requests], ["GET", "POST", "GET"])
 
-    def test_public_probe_uses_real_swap_units_and_never_opens_session(self):
+    def test_authenticated_probe_uses_real_swap_units_and_saved_session(self):
         opener = Opener([Response(var_metadata()), Response(var_quote())])
-        with patch("variational_grid.client.Client.session", side_effect=AssertionError("must not read secrets")):
-            result = VarSwapClient(opener=opener, clock=lambda: NOW).market()
+        result = VarSwapClient(opener=opener, clock=lambda: NOW).market()
         self.assertTrue(result["is_probe"])
         self.assertEqual(result["symbol"], "US100S")
         self.assertEqual(result["multiplier"], "1")
         self.assertEqual(result["size_step"], "0.000001")
         self.assertEqual(result["funding_status"], "missing")
         request = opener.requests[-1]
-        self.assertEqual(request.full_url, "https://omni.variational.io/api/quotes/simple")
+        self.assertEqual(request.full_url, "https://omni.variational.io/api/quotes/indicative")
         self.assertEqual(json.loads(request.data)["instrument"], VAR_INSTRUMENT)
-        self.assertIsNone(request.get_header("Cookie"))
+        self.assertEqual(request.get_header("Cookie"), "vr-token=fixture.token.signature")
 
     def test_exact_requested_quantity_and_direction_limits(self):
         data = var_quote("0.032778")
@@ -345,7 +350,7 @@ class VarSwapMarketTests(unittest.TestCase):
     def test_fixed_routes_and_redirect_rejection_prevent_credential_escape(self):
         opener = Opener([])
         client = VarSwapClient(opener=opener, clock=lambda: NOW)
-        for method, path in [("POST", "/api/quotes/accept"), ("POST", "/api/quotes/indicative"), ("POST", "/api/orders/new/market"),
+        for method, path in [("POST", "/api/quotes/accept"), ("POST", "/api/quotes/simple"), ("POST", "/api/orders/new/market"),
                              ("GET", "https://evil.invalid"), ("GET", "/api/me")]:
             with self.assertRaises(GridError):
                 client.transport.request(method, path)
@@ -359,7 +364,7 @@ class VarSwapMarketTests(unittest.TestCase):
 class MarketRateLimitTests(unittest.TestCase):
     @staticmethod
     def error(retry=None):
-        return urllib.error.HTTPError("https://omni.variational.io/api/quotes/simple", 429, "private body",
+        return urllib.error.HTTPError("https://omni.variational.io/api/quotes/indicative", 429, "private body",
                                       {} if retry is None else {"Retry-After": retry}, io.BytesIO(b"private body"))
 
     def test_retry_after_seconds_date_and_fallback(self):
@@ -375,18 +380,18 @@ class MarketRateLimitTests(unittest.TestCase):
         opener = Opener([error, Response({}, NOW + 1800)])
         transport = VarSwapClient(opener=opener, clock=lambda: now[0]).transport
         with self.assertRaisesRegex(RequestDeferred, "Variational.*HTTP 429") as caught:
-            transport.request("POST", "/api/quotes/simple", body={})
+            transport.request("POST", "/api/quotes/indicative", body={})
         self.assertNotIn("private", str(caught.exception))
         for offset in (2, 60, 1799):
             now[0] = NOW + offset
-            for method, path in [("POST", "/api/quotes/simple"), ("GET", "/api/metadata/supported_assets")]:
+            for method, path in [("POST", "/api/quotes/indicative"), ("GET", "/api/metadata/supported_assets")]:
                 with self.assertRaises(RequestDeferred):
                     transport.request(method, path)
         self.assertEqual(len(opener.requests), 1)
         lighter = LighterClient(opener=Opener([Response({})]), clock=lambda: NOW).transport
         lighter.request("GET", "/api/v1/orderBookDetails")
         now[0] = NOW + 1800
-        transport.request("POST", "/api/quotes/simple", body={})
+        transport.request("POST", "/api/quotes/indicative", body={})
         self.assertEqual(len(opener.requests), 2)
         self.assertEqual(transport.failures, {})
         self.assertEqual(transport.retry_at, 0)
@@ -397,11 +402,11 @@ class MarketRateLimitTests(unittest.TestCase):
         opener = Opener([self.error(), Response({}, NOW + 60), self.error()])
         transport = VarSwapClient(opener=opener, clock=lambda: now[0]).transport
         with self.assertRaises(RequestDeferred):
-            transport.request("POST", "/api/quotes/simple")
+            transport.request("POST", "/api/quotes/indicative")
         now[0] += 60
         transport.request("GET", "/api/metadata/supported_assets")
         with self.assertRaises(RequestDeferred) as caught:
-            transport.request("POST", "/api/quotes/simple")
+            transport.request("POST", "/api/quotes/indicative")
         self.assertEqual(caught.exception.retry_at, NOW + 180)
         restored_opener = Opener([])
         restored = VarSwapClient(opener=restored_opener, clock=lambda: now[0]).transport
@@ -409,7 +414,7 @@ class MarketRateLimitTests(unittest.TestCase):
         with self.assertRaises(RequestDeferred):
             restored.request("GET", "/api/metadata/supported_assets")
         self.assertEqual(restored_opener.requests, [])
-        self.assertEqual(restored.failures["/api/quotes/simple"], 2)
+        self.assertEqual(restored.failures["/api/quotes/indicative"], 2)
         with self.assertRaises(GridError):
             restored.restore({"venue": "Variational"})
 
@@ -426,9 +431,9 @@ class MarketRateLimitTests(unittest.TestCase):
         transport = VarSwapClient(opener=opener, clock=lambda: NOW).transport
         with transport.quote_batch():
             with self.assertRaises(RequestDeferred):
-                transport.request("POST", "/api/quotes/simple", probe=True)
+                transport.request("POST", "/api/quotes/indicative", probe=True)
             with self.assertRaises(RequestDeferred) as caught:
-                transport.request("POST", "/api/quotes/simple")
+                transport.request("POST", "/api/quotes/indicative")
             self.assertTrue(caught.exception.limited)
         self.assertEqual(len(opener.requests), 1)
 

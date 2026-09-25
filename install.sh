@@ -465,8 +465,7 @@ if sys.argv[1] in ('compare', 'inventory', 'qqq-hedge'):
     experiment = Experiment.load(path)
     expected = replace(config, center_hours=72, max_levels=None, max_margin_fraction=None) if sys.argv[1] == 'inventory' else config
     if sys.argv[1] == 'qqq-hedge':
-        # Keep the schema's base reference stable; public QQQ/US100 feeds do not
-        # use the legacy economics, session or single-strategy state file.
+        # QQQ uses the base session path, but not legacy economics or ledger.
         valid_base = (path.parent / spec['base_config']).resolve() == base_path.resolve()
     else:
         valid_base = experiment.base == expected
@@ -476,7 +475,7 @@ if sys.argv[1] in ('compare', 'inventory', 'qqq-hedge'):
     if output == Path('/var/lib/variational-grid') or not output.is_relative_to('/var/lib/variational-grid'):
         raise SystemExit('Service experiment output must stay inside /var/lib/variational-grid')
 root = Path('/var/lib/variational-grid').resolve()
-for value in (() if sys.argv[1] == 'qqq-hedge' else (config.session_file, config.state_file)):
+for value in ((config.session_file,) if sys.argv[1] == 'qqq-hedge' else (config.session_file, config.state_file)):
     path = Path(value).resolve()
     if path == root or not path.is_relative_to(root):
         raise SystemExit('Service session_file and state_file must stay inside /var/lib/variational-grid')
@@ -492,15 +491,15 @@ else:
     print('QQQ settings unchanged; skipping migration.')
 PY
   )
-  echo 'QQQ / US100 public paper pricing selected; persisted shared reference quotes are enabled by default; no login session is required.'
-elif ! (cd "$release" && runuser -u "$account" -- python3 -m variational_grid check-session --config "$conf/$config_name"); then
+  echo 'QQQ public feed / US100 vr-token authenticated paper pricing selected; existing simulation ledgers are preserved.'
+fi
+if ! (cd "$release" && runuser -u "$account" -- python3 -m variational_grid check-session --config "$conf/$config_name"); then
   echo 'A valid login session is needed for quantity-specific indicative quotes; public candles and statistics do not require one.'
   echo 'Paste only the vr-token cookie when prompted (input is hidden). No wallet private key is needed.'
   # /dev/tty keeps this interactive even when the installer arrives through curl | bash.
   (cd "$release" && runuser -u "$account" -- python3 -m variational_grid init-session --config "$conf/$config_name" </dev/tty)
 fi
-# Validate configuration and, for modes using it, the session above. Neither
-# requires a restart when unchanged; session files are reloaded by those modes.
+# All market runners reload the protected session file without a restart.
 if [[ $mode == compare ]]; then
   (cd "$release" && python3 - "$conf/experiments.json" <<'PY'
 import sys
@@ -543,8 +542,15 @@ fi
 settings_key=$({
   printf '%s\n' "$mode"
   if [[ $mode != qqq-hedge ]]; then
-    # Public QQQ/US100 data uses none of the legacy base economics or credentials.
     sha256sum "$conf/$config_name"
+  else
+    # Session content is reloaded; changing its configured path needs a restart.
+    python3 - "$conf/$config_name" <<'PY'
+import json, sys
+from pathlib import Path
+path = Path(sys.argv[1])
+print((path.parent / json.loads(path.read_text())['session_file']).resolve())
+PY
   fi
   if [[ $mode != run ]]; then sha256sum "$conf/$experiment_name"; fi
 } | sha256sum | cut -d ' ' -f1)

@@ -9,11 +9,11 @@ from unittest.mock import patch
 from variational_grid.models import Config, GridError
 from variational_grid.qqq_comparison import QQQExperiment, QQQCohort, QQQMarketFeed
 from variational_grid.qqq_hedge import QQQSettings
-from variational_grid.qqq_market import VarSwapClient
+from test_qqq_market import VarSwapClient
 from variational_grid.qqq_migration import upgrade_qqq_defaults, VERSION
 from variational_grid.qqq_scalper import CURRENT_MODEL, ScalperSettings
 from test_qqq import market
-from test_qqq_cache import PublicSource
+from test_qqq_cache import QuoteSource
 from test_qqq_market import NOW
 
 
@@ -187,7 +187,7 @@ class MigrationTests(unittest.TestCase):
         self.path.write_text(json.dumps(scalper_spec()))
         old = QQQExperiment.load(self.path)
         now = [NOW]
-        source = PublicSource(now)
+        source = QuoteSource(now)
         var = VarSwapClient(opener=source, clock=lambda: now[0], max_age_seconds=60)
         q = SimpleNamespace(snapshot=lambda: market(now[0]))
         feed = QQQMarketFeed(old, q, var)
@@ -206,8 +206,9 @@ class MigrationTests(unittest.TestCase):
         with QQQCohort(new) as cohort:
             with patch("variational_grid.qqq_comparison.time.time", side_effect=lambda: now[0]):
                 observation = feed.next(cohort)
-            self.assertTrue(observation.market["allow_entries"])
-            self.assertEqual(observation.market["var"]["ts"], NOW)
+            self.assertFalse(observation.market["allow_entries"])
+            self.assertIsNone(observation.market["var"])
+            self.assertEqual(feed.reference.quote["ts"], NOW)
             self.assertEqual(len(source.posts), 2)
             self.assertTrue((new.output / "quote-cache.json").exists())
 

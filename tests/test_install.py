@@ -214,8 +214,8 @@ if name == "runuser":
     def test_qqq_fresh_install_preserves_saved_mode_and_reuses_unchanged_deployment(self):
         result = self.install('--qqq-hedge')
         self.assertIn('skipping legacy grid migrations', result.stdout)
-        self.assertIn('no login session is required', result.stdout)
-        self.assertFalse(any(c[0] == 'runuser' for c in self.calls()))
+        self.assertIn('vr-token authenticated paper pricing', result.stdout)
+        self.assertTrue(any(c[0] == 'runuser' and 'check-session' in c for c in self.calls()))
         self.assertEqual((self.conf / 'mode').read_text().strip(), 'qqq-hedge')
         self.assertIn(f'compare --experiments {self.conf}/qqq-hedge.json', self.unit.read_text())
         self.assertIn(f'dashboard --experiments {self.conf}/qqq-hedge.json --port 9876', self.web_unit.read_text())
@@ -361,12 +361,39 @@ if name == "runuser":
         self.log.write_text('')
         config = json.loads(config_path.read_text())
         config['fee_bps_per_leg'] = '3'
-        config['session_file'] = str(self.state / 'unused-session.json')
+        # Legacy economics alone must not restart QQQ; its session path now matters.
         config_path.write_text(json.dumps(config))
         self.install()
         self.assertEqual(self.restarts(), [])
         self.assertEqual(Experiment.load(qqq_path).identity(), identity)
-        self.assertFalse(any(c[0] == 'runuser' for c in self.calls()))
+        self.assertTrue(any(c[0] == 'runuser' and 'check-session' in c for c in self.calls()))
+
+    def test_qqq_session_path_is_validated_and_changes_restart_without_reset(self):
+        self.install('--qqq-hedge')
+        path = self.conf / 'config.json'
+        original = json.loads(path.read_text())
+        spec = (self.conf / 'qqq-hedge.json').read_bytes()
+        current = (self.app / 'current').resolve()
+        self.log.write_text('')
+        path.write_text(json.dumps({**original, 'session_file': str(self.root / 'outside-session.json')}))
+        result = self.install(expected=1)
+        self.assertIn('must stay inside', result.stderr)
+        self.assertEqual(self.restarts(), [])
+        self.assertEqual((self.app / 'current').resolve(), current)
+        path.write_text(json.dumps({**original, 'session_file': str(self.state / 'updated-session.json')}))
+        self.install()
+        self.assertIn('variational-grid.service', self.restarts())
+        self.assertEqual((self.conf / 'qqq-hedge.json').read_bytes(), spec)
+        self.log.write_text('')
+        self.install()
+        self.assertEqual(self.restarts(), [])
+
+    def test_qqq_missing_token_prompts_hidden_import(self):
+        self.env['GRID_INSTALL_TEST_MISSING_SESSION'] = '1'
+        result = self.install('--qqq-hedge')
+        self.assertIn('Fixture: hidden session import completed', result.stdout)
+        self.assertIn('vr-token', result.stdout)
+        self.assertIn('compare --experiments', self.unit.read_text())
 
     def test_qqq_examples_revalidate_without_overwriting_config_and_web_only_restarts_web(self):
         self.install('--qqq-hedge')

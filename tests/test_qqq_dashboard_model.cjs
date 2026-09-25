@@ -338,3 +338,17 @@ test('distance-free model still publishes cooldown progress and labels fill prov
     assert.equal(Q.fillPricing({maker_model:model,venue:'Lighter'}),'剥头皮 · 严格 Maker 队列模拟');
   }
 });
+
+test('reference authentication state is explicit and legacy snapshots keep their source label', () => {
+  const quote_cache = {mode:'shared_indicative_v1',source_ts:100,max_age_seconds:60,available:true,authentication:'vr-token',authenticated:true};
+  const data = {server_ts:102,summary:{market:{quote_cache}}};
+  assert.match(Q.referenceStatus(data).label,/Var token 已验证/);
+  quote_cache.available = false;
+  quote_cache.authenticated = false;
+  quote_cache.refresh_error = 'Var 会话被拒绝（HTTP 401/403）';
+  assert.equal(Q.referenceStatus(data).usable,false);
+  assert.match(Q.referenceStatus(data).error,/401\/403/);
+  assert.match(Q.referenceStatus(data).label,/Var token 未就绪/);
+  delete quote_cache.authentication;
+  assert.doesNotMatch(Q.referenceStatus(data).label,/Var token/);
+});

@@ -132,7 +132,8 @@
     const age = M.finite(cache.source_ts) && M.finite(data.server_ts) ? Math.max(0, Number(data.server_ts) + Math.max(0, elapsedSeconds) - Number(cache.source_ts)) : null;
     const usable = cache.available === true && age !== null && age <= Number(cache.max_age_seconds);
     const label = age === null ? '等待首份参考报价' : !usable ? `参考价不可用 · 报价已有 ${Math.floor(age)} 秒` : `${cache.cache_used ? '缓存估算' : '共享参考价估算'} · 报价已有 ${Math.floor(age)} 秒`;
-    return {age, usable, label, limit:cache.max_age_seconds, error:cache.refresh_error || ''};
+    const auth = cache.authentication === 'vr-token' ? (cache.authenticated ? 'Var token 已验证' : 'Var token 未就绪') : '';
+    return {age, usable, label:auth ? `${auth} · ${label}` : label, limit:cache.max_age_seconds, error:cache.refresh_error || ''};
   }
   function fillPricing(row) {
     if (row?.pricing_mode === 'shared_indicative_v1') return `${row.cache_used ? '缓存参考价估算' : '共享参考价估算'} · 报价龄 ${M.number(row.quote_age_seconds, 1)} 秒 · 源数量 ${M.number(row.source_qty, 6)}${row.half_spread_percent == null ? '' : ' · 半点差 ' + percent(row.half_spread_percent, 4)}`;
@@ -187,7 +188,7 @@
     else if (runtime === 'paused') notice = '行情暂停，保留最近有效采样：' + sourceReason(data.runtime.reason);
     else if (cooldown) notice = cooldown + (reference?.usable && s?.market?.source_status === 'ready' ? `。${reference.label}，模拟继续。` : '。暂停新开仓，保留已有仓位和已确认的模拟成交。');
     else if (f.stale) notice = '行情已过期，收益和仓位估值停留在最后有效采样。';
-    else if (reference && !reference.usable) notice = `${reference.label}，等待刷新；缓存最长使用 ${reference.limit} 秒。`;
+    else if (reference && !reference.usable) notice = `${reference.label}。${reference.error || '等待刷新'}；缓存最长使用 ${reference.limit} 秒。`;
     else if (reference?.error && s?.market?.source_status === 'ready') notice = `刷新暂缓，${reference.label}，模拟继续。${reference.error}`;
     else if (s?.market?.gap) notice = '公共成交序列存在缺口；保留已知仓位与损益，暂停新开仓。';
     else if (s?.market?.source_reason) notice = sourceReason(s.market.source_reason);

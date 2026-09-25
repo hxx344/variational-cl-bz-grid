@@ -1,4 +1,4 @@
-"""Journaled QQQ / US100 paper comparison and public-feed runner."""
+"""Journaled QQQ / US100 paper comparison with read-only market feeds."""
 from contextlib import closing, nullcontext
 from dataclasses import asdict, dataclass, field
 import base64
@@ -17,6 +17,7 @@ from .models import D, GridError, dec, utc
 from .qqq_hedge import QQQConfig, QQQEngine, QQQSettings, QQQStore, digest, encoded, hedge_target
 from .qqq_market import RequestDeferred
 from .qqq_pricing import QQQPricing, ReferenceCache, source_valid, reference_price
+from .qqq_auth import SessionUnavailable
 from .qqq_scalper import ScalperSettings
 
 
@@ -251,6 +252,7 @@ class QQQCohort(Cohort):
                               "us100_bid": v["bid"] if v else None, "us100_ask": v["ask"] if v else None, "us100_mark": v["mark"] if v else None,
                               "qqq_source_ts": q.get("source_ts", q["ts"]), "qqq_source_time_kind": q.get("source_time_kind", "observed"),
                               "var_source_ts": v["ts"] if v else None,
+                              "var_source": v.get("source") if v else None,
                               "source_status": "ready" if frame.market["allow_entries"] else "paused_entries",
                               "source_reason": frame.market.get("reason", ""), "gap": q["gap"]}}
         if "pricing_policy" in frame.market:
@@ -282,7 +284,8 @@ class QQQMarketFeed:
         from .qqq_market import LighterClient, VarSwapClient
         self.experiment = experiment
         self.lighter = lighter or LighterClient()
-        self.var = var or VarSwapClient(max_age_seconds=experiment.pricing.max_age_seconds if experiment.pricing.mode == "shared_indicative_v1" else 10)
+        self.var = var or VarSwapClient(session_file=experiment.base.session_file,
+            max_age_seconds=experiment.pricing.max_age_seconds if experiment.pricing.mode == "shared_indicative_v1" else 10)
         self._quote_cursor = 0
         self._cooldown_path = experiment.output / "market-cooldowns.json"
         self._saved_cooldowns = None
@@ -391,6 +394,9 @@ class QQQMarketFeed:
                     market.update(var=None, allow_entries=False)
                     self._quote_cursor = (names.index(name) + 1) % len(names)
                 break  # Do not burst the remaining quantities into a cooling venue.
+            except SessionUnavailable as error:
+                market.update(var=None, reason=str(error), allow_entries=False)
+                break
             except GridError as error:
                 market.update(reason=str(error), allow_entries=False)
                 self._quote_cursor = (names.index(name) + 1) % len(names)

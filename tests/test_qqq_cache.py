@@ -12,14 +12,13 @@ import urllib.error
 from variational_grid.models import Config, D, GridError
 from variational_grid.qqq_comparison import QQQExperiment, QQQCohort, QQQMarketFeed, read_qqq_dashboard, write_export
 from variational_grid.qqq_hedge import QQQConfig, QQQSettings
-from variational_grid.qqq_market import VarSwapClient
 from variational_grid.qqq_pricing import QQQPricing, ReferenceCache
 from variational_grid.reset import read_state, request_reset, process_reset
 from test_qqq import market, trade
-from test_qqq_market import NOW, Response, var_metadata, var_quote
+from test_qqq_market import NOW, Response, var_metadata, var_quote, VarSwapClient
 
 
-class PublicSource:
+class QuoteSource:
     def __init__(self, now):
         self.now, self.posts, self.gets = now, [], 0
         self.failure, self.lag, self.closed, self.close_only = None, 0, False, False
@@ -44,7 +43,7 @@ class CacheTests(unittest.TestCase):
         self.addCleanup(self.temp.cleanup)
         self.path = Path(self.temp.name) / "quote-cache.json"
         self.now = [NOW]
-        self.source = PublicSource(self.now)
+        self.source = QuoteSource(self.now)
         self.client = VarSwapClient(opener=self.source, clock=lambda: self.now[0], max_age_seconds=60)
         self.cache = ReferenceCache(self.client, self.path, QQQPricing(), write_export)
 
@@ -104,7 +103,7 @@ class CacheTests(unittest.TestCase):
         other = VarSwapClient(opener=self.source, clock=lambda: self.now[0], max_age_seconds=60)
         other.transport.restore(saved)
         recovered = ReferenceCache(other, self.path, QQQPricing(), write_export)
-        for age, expected in ((20, True), (60, True), (60.1, False)):
+        for age, expected in ((20, False), (60, False), (60.1, False)):
             self.now[0] = NOW + age
             current, state = recovered.read()
             self.assertEqual(current is not None, expected)
@@ -160,7 +159,7 @@ class SharedPricingTests(unittest.TestCase):
                 name = f"s{spacing}-h{band}"
                 configs[name] = QQQConfig(settings, name, spacing, band, str(output / "ledgers" / (name + ".sqlite3")))
         self.experiment = QQQExperiment(SimpleNamespace(poll_seconds=2), output, configs, settings)
-        self.source = PublicSource(self.now)
+        self.source = QuoteSource(self.now)
         self.var = VarSwapClient(opener=self.source, clock=lambda: self.now[0], max_age_seconds=60)
         self.q = [market(NOW)]
         self.lighter = SimpleNamespace(snapshot=lambda: self.q[0])
@@ -262,7 +261,8 @@ class SharedPricingTests(unittest.TestCase):
             self.assertTrue(process_reset(cohort))
             self.assertTrue((self.experiment.output / "quote-cache.json").exists())
             restored = QQQMarketFeed(self.experiment, self.lighter, VarSwapClient(opener=self.source, clock=lambda: self.now[0], max_age_seconds=60))
-            self.assertEqual(restored.reference.usable(self.now[0])["ts"], NOW)
+            self.assertEqual(restored.reference.quote["ts"], NOW)
+            self.assertIsNone(restored.reference.usable(self.now[0]))  # Restart needs an authenticated quote.
             self.assertEqual(self.experiment.identity(), identity)
 
     def test_existing_configuration_and_identity_survive_policy_changes(self):
