@@ -378,3 +378,18 @@ test('saving a token does not relabel an older quote as the new session confirma
   assert.equal(Q.referenceStatus(data).usable,true);
   assert.match(Q.referenceStatus(data).label,/Var token 已验证/);
 });
+
+test('dust IOC is a priced exit attempt and does not masquerade as blocked entries', () => {
+  const row = {scalper:{model:'perp_dex_scalper_v3',phase:'opening',take_profit_blockers:[],small_take_profits:[{slot:56,quantity:'0.0008',limit:'743.4'}]}};
+  const status = Q.scalperStatus(row);
+  assert.equal(status.phase,'已提交模拟开仓单');
+  assert.equal(status.pending,false);
+  assert.match(status.exitDetail,/批次 56：小额余仓 0\.000800 QQQ/);
+  assert.match(status.exitDetail,/不低于 743\.4000 USDC 的限价 IOC/);
+  assert.match(status.exitDetail,/不阻塞其他开仓/);
+  assert.doesNotMatch(status.exitDetail,/未覆盖|未达最小/);
+  const fill = {maker_model:'perp_dex_scalper_v3',reason:'taker_take_profit',time_in_force:'IOC',quote_source_ts:100};
+  assert.equal(Q.fillReason(fill),'IOC 小额止盈');
+  assert.match(Q.fillPricing(fill),/IOC 小额限价止盈/);
+  assert.doesNotMatch(Q.fillPricing(fill),/GTT/);
+});

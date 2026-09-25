@@ -241,7 +241,11 @@ def _status(account, market, now, config, phase, gate, waived=False):
     if not config.scalper.entry_distance_enabled:
         result.update(entry_distance_enabled=False, grid_allowed=None)
     if config.scalper.gtt_take_profit:
-        from .qqq_execution import take_profit_coverage
+        from .qqq_execution import TAKE_PROFIT_POLICY, take_profit_coverage
         result.update(take_profit_execution="gtt_limit_v1", take_profit_blockers=take_profit_coverage(account),
                       take_profits_in_flight=sum(bool(o.get("activation_pending")) for o in account["orders"]))
+        if market.get("take_profit_policy") == TAKE_PROFIT_POLICY:
+            result.update(take_profit_execution=TAKE_PROFIT_POLICY,
+                          small_take_profits=[{"slot": o["slot"], "quantity": o["remaining"], "limit": o["price"]}
+                                             for o in account["orders"] if o.get("time_in_force") == "IOC"])
     return result

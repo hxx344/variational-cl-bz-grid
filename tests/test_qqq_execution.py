@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from variational_grid.models import D, GridError
 from variational_grid.qqq_comparison import QQQCohort, QQQExperiment
-from variational_grid.qqq_execution import submit_take_profit
+from variational_grid.qqq_execution import TAKE_PROFIT_POLICY, submit_take_profit
 from variational_grid.qqq_hedge import initial_account, maker_step
 from variational_grid.qqq_scalper import CURRENT_MODEL, ScalperSettings
 from test_qqq import market, quote, trade
@@ -19,7 +19,8 @@ from test_qqq_scalper import config
 def book(ts, bid="100.09", ask="100.11", bids=None, asks=None, trades=(), **extra):
     result = market(ts, trades, mark=str((D(bid) + D(ask)) / 2), bid=bid, ask=ask)
     result.update(bids=bids if bids is not None else [[bid, "100"]],
-                  asks=asks if asks is not None else [[ask, "100"]], source_ts=ts, **extra)
+                  asks=asks if asks is not None else [[ask, "100"]], source_ts=ts,
+                  take_profit_policy=TAKE_PROFIT_POLICY, **extra)
     return result
 
 
@@ -112,12 +113,14 @@ class GTTTakeProfitTests(unittest.TestCase):
         self.assertEqual(D(account["qqq"]["qty"]), 0)
         self.assertEqual(len(fills), 1)
 
-    def test_finalized_small_partial_preserves_inventory_and_reports_minimum(self):
+    def test_unversioned_frame_preserves_legacy_small_partial_rejection(self):
         for quantity, reason in ((".001", "below_min_quantity"), (".01", "below_min_notional")):
             with self.subTest(quantity=quantity):
                 account = self.filled(quantity)
                 account, _ = maker_step(account, book(120), 120, self.config, False)
-                account, fills = maker_step(account, book(122), 122, self.config, True)
+                legacy = book(122)
+                del legacy["take_profit_policy"]
+                account, fills = maker_step(account, legacy, 122, self.config, True)
                 self.assertEqual(fills, [])
                 self.assertEqual(D(account["qqq"]["qty"]), D(quantity))
                 status = account["scalper"]["status"]

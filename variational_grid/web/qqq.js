@@ -21,7 +21,7 @@
     const phases = {market_gap:'QQQ 行情过期或存在缺口，暂停开仓',entry_paused:'行情受限，暂停开仓',awaiting_fill:'开仓单等待成交',cancel_pending:'等待撤单确认',cooling_down:'等待开仓冷却',grid_blocked:'价格距离不足',capacity_full:'批次已满，暂停开仓',post_only_wait:'等待可挂 Maker 的价格',opening:'已提交模拟开仓单',take_profit_pending:'等待挂出独立止盈单'};
     return {
       phase:gttExits(row) && s.phase === 'take_profit_pending' ? '止盈单未挂出，暂停开仓' : phases[s.phase] || '等待开仓状态',
-      exitDetail:(s.take_profit_blockers || []).map(b => `批次 ${M.number(b.slot,0)}：${({below_min_quantity:'未达最小下单数量',below_min_notional:'未达最小下单金额',quantity_off_step:'数量不符合步长',awaiting_submission:'等待提交止盈'}[b.reason] || '等待提交止盈')}，未覆盖 ${M.number(b.quantity,6)} QQQ`).join('；') || (s.take_profits_in_flight > 0 ? `${M.number(s.take_profits_in_flight,0)} 笔止盈单等待提交延迟结束后的新盘口` : ''),
+      exitDetail:[...(s.take_profit_blockers || []).map(b => `批次 ${M.number(b.slot,0)}：${({below_min_quantity:'未达最小下单数量',below_min_notional:'未达最小下单金额',quantity_off_step:'数量不符合步长',invalid_quantity:'数量必须为正',awaiting_submission:'等待提交止盈'}[b.reason] || '等待提交止盈')}，未覆盖 ${M.number(b.quantity,6)} QQQ`), ...(s.small_take_profits || []).map(b => `批次 ${M.number(b.slot,0)}：小额余仓 ${M.number(b.quantity,6)} QQQ，按不低于 ${M.number(b.limit,4)} USDC 的限价 IOC 尝试止盈，等待新盘口；不阻塞其他开仓`)].join('；') || (s.take_profits_in_flight > 0 ? `${M.number(s.take_profits_in_flight,0)} 笔止盈单等待提交延迟结束后的新盘口` : ''),
       waiting:s.cooldown_waived === true ? '本轮批次减少，已跳过冷却' : Number(s.active_entries) > 0 ? '开仓单处理中，下次冷却从入场完成起算' : M.finite(s.cooldown_remaining_seconds) ? `采样时冷却剩余 ${seconds(Math.max(0, Number(s.cooldown_remaining_seconds)))}` : '采样时冷却剩余未提供',
       gate:distanceFree(row) ? '新开仓距离门槛已取消' : s.grid_allowed === true ? '价格距离已满足' : s.grid_allowed === false ? '价格距离未满足' : '价格距离未评估',
       orders:`开仓 ${M.number(s.active_entries,0)} / 1 · TP ${M.number(s.active_take_profits,0)} · 占用 ${M.number(s.occupied_batches,0)} / ${M.number(s.max_batches,0)} 批`,
@@ -31,7 +31,7 @@
   }
   function fillReason(fill) {
     const value = fill?.reason;
-    if (value === 'taker_take_profit') return 'Taker 批次止盈';
+    if (value === 'taker_take_profit') return fill.time_in_force === 'IOC' ? 'IOC 小额止盈' : 'Taker 批次止盈';
     if (isScalperModel(fill?.maker_model) && ['maker_entry','maker_take_profit'].includes(value)) return value === 'maker_entry' ? 'Maker 剥头皮开仓' : 'Maker 批次止盈';
     return ({grid_entry:'网格买入',grid_buy:'网格买入',maker_entry:'Maker 网格买入',maker_take_profit:'Maker 网格止盈',grid_take_profit:'网格止盈',grid_tp:'网格止盈',take_profit:'止盈',delta_hedge:'敞口对冲调整',hedge:'空头对冲',hedge_open:'增加空头对冲',hedge_reduce:'减少空头对冲',rebalance:'对冲调整',hedge_rebalance:'对冲调整',initial:'初始建仓'}[value] || value || '—');
   }
@@ -141,7 +141,7 @@
     return {age, usable, label:auth ? `${auth} · ${label}` : label, limit:cache.max_age_seconds, error:cache.refresh_error || ''};
   }
   function fillPricing(row) {
-    if (row?.reason === 'taker_take_profit') return `GTT 限价止盈 · 可见买盘逐档模拟 · 盘口 ${M.date(row.quote_source_ts)}`;
+    if (row?.reason === 'taker_take_profit') return `${row.time_in_force === 'IOC' ? 'IOC 小额限价止盈' : 'GTT 限价止盈'} · 可见买盘逐档模拟 · 盘口 ${M.date(row.quote_source_ts)}`;
     if (row?.pricing_mode === 'shared_indicative_v1') return `${row.cache_used ? '缓存参考价估算' : '共享参考价估算'} · 报价龄 ${M.number(row.quote_age_seconds, 1)} 秒 · 源数量 ${M.number(row.source_qty, 6)}${row.half_spread_percent == null ? '' : ' · 半点差 ' + percent(row.half_spread_percent, 4)}`;
     return row?.venue === 'Variational' ? '原精确数量报价' : isScalperModel(row?.maker_model) ? '剥头皮 · 严格 Maker 队列模拟' : 'Maker 队列模拟';
   }

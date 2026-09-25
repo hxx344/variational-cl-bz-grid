@@ -136,6 +136,10 @@ class QQQFrame:
         if not math.isfinite(self.ts) or self.ts <= 0 or self.data_kind not in {"synthetic", "live_indicative"} or set(self.plans) != set(experiment.scenarios):
             raise GridError("Invalid QQQ shared observation")
         q = self.market["lighter"]
+        if "take_profit_policy" in q:
+            from .qqq_execution import TAKE_PROFIT_POLICY
+            if q["take_profit_policy"] != TAKE_PROFIT_POLICY:
+                raise GridError("Unknown QQQ take-profit execution policy")
         if type(q["gap"]) is not bool or type(q["ready"]) is not bool or type(self.market["allow_entries"]) is not bool:
             raise GridError("Invalid QQQ feed status")
         for value in (q["price_tick"], q["size_step"], q["min_qty"]):
@@ -213,6 +217,11 @@ class QQQCohort(Cohort):
         return QQQFrame.decode(raw)
 
     def prepare_frame(self, ts, market, quotes=None, data_kind="live_indicative"):
+        if self.experiment.scalper is not None and self.experiment.scalper.gtt_take_profit:
+            from .qqq_execution import TAKE_PROFIT_POLICY
+            # Version observations, not the economic identity: old pending frames
+            # must recover identically across accounts before the new policy starts.
+            market = {**market, "lighter": {**market["lighter"], "take_profit_policy": TAKE_PROFIT_POLICY}}
         plans = {}
         for name, engine in self.engines.items():
             account, _ = engine.prepare(market, ts)
