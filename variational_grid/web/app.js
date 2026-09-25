@@ -182,27 +182,29 @@
   }
 
   async function refresh() {
-    clearTimeout(timer); controller?.abort(); controller=new AbortController();
+    clearTimeout(timer); controller?.abort();
+    if (!window.GridHub.active()) return;
+    controller=new AbortController();
     const request=controller, timeout=setTimeout(()=>request.abort(),8000);
     $('refresh').disabled=true;
     try {
       const response=await fetch('/api/dashboard?range='+encodeURIComponent(state.range),{signal:request.signal,cache:'no-store'});
       if(!response.ok) throw new Error('HTTP '+response.status);
       const next=await response.json();
-      if(request!==controller) return;
+      if(request!==controller || !window.GridHub.active()) return;
       if(data?.reset?.generation !== next.reset?.generation) {selectedTs=null;page=0;gridPages.clear();}
       data=next; received=Date.now(); serverAge=data.summary?data.server_ts-data.summary.ts:0; disconnected=false;
       // Preserve URL state while waiting for the first published sample.
       if(data.summary) state=M.state(location.search,names());
       render();
     } catch(error) {
-      if(request!==controller) return;
+      if(request!==controller || !window.GridHub.active()) return;
       disconnected=true;
       if(data) status();
       else { $('notice').hidden=false; $('notice').textContent='暂时无法读取监控数据，页面将自动重试。'; $('status').textContent='连接中断'; $('status').className='status error'; }
     } finally {
       clearTimeout(timeout);
-      if(request===controller) { $('refresh').disabled=false; if(!document.hidden) timer=setTimeout(refresh,10000); }
+      if(request===controller) { $('refresh').disabled=false; if(window.GridHub.active()) timer=setTimeout(refresh,10000); }
     }
   }
 
@@ -270,6 +272,6 @@
   window.addEventListener('popstate',()=>{state=M.state(location.search,names());page=0;render();refresh();});
   let resize;
   new ResizeObserver(()=>{clearTimeout(resize);resize=setTimeout(renderCharts,80);}).observe($('pnl-chart'));
-  document.addEventListener('visibilitychange',()=>{if(document.hidden){clearTimeout(timer);controller?.abort();}else refresh();});
-  setInterval(status,1000);refresh();
+  window.GridHub.subscribe(active => {if (active) refresh(); else {clearTimeout(timer); controller?.abort();}});
+  setInterval(()=>{if(window.GridHub.active()) status();},1000);refresh();
 })();

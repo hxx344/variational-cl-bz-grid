@@ -136,7 +136,7 @@ class DeploymentStorage:
         # directories, even those named like hashes, must not be removed.
         try:
             return (not (path / 'pyproject.toml').is_symlink()
-                    and tomllib.loads((path / 'pyproject.toml').read_text())['project']['name'] == 'variational-cl-bz-grid'
+                    and tomllib.loads((path / 'pyproject.toml').read_text())['project']['name'] in {'variational-cl-bz-grid', 'variational-grid'}
                     and (path / 'install.sh').is_file()
                     and (path / 'variational_grid/__init__.py').is_file())
         except (OSError, ValueError, KeyError):
@@ -272,7 +272,8 @@ fi
 app=/opt/variational-grid
 conf=/etc/variational-grid
 state=/var/lib/variational-grid
-repository=https://github.com/hxx344/variational-cl-bz-grid.git
+repository=https://github.com/hxx344/variational-grid.git
+legacy_repository=https://github.com/hxx344/variational-cl-bz-grid.git
 account=variational-grid
 installer_source=''
 if [[ -n ${BASH_SOURCE[0]:-} && -f ${BASH_SOURCE[0]} ]]; then
@@ -353,7 +354,13 @@ if [[ ! -d "$app/source/.git" ]]; then
   git clone --depth 1 --branch main "$repository" "$app/source"
   revision=$(git -C "$app/source" rev-parse 'origin/main^{commit}')
 else
-  [[ $(git -C "$app/source" remote get-url origin) == "$repository" ]] || { echo 'Unexpected existing source remote.' >&2; exit 1; }
+  source_remote=$(git -C "$app/source" remote get-url origin)
+  if [[ $source_remote == "$legacy_repository" ]]; then
+    git -C "$app/source" remote set-url origin "$repository"
+    echo 'Updated the renamed repository remote; existing releases and data are preserved.'
+    source_remote=$repository
+  fi
+  [[ $source_remote == "$repository" ]] || { echo 'Unexpected existing source remote.' >&2; exit 1; }
   revision=$(git -C "$app/source" ls-remote --exit-code origin refs/heads/main | cut -f1)
   [[ $revision =~ ^[a-f0-9]{40}$ ]] || { echo 'Cannot determine the remote main revision.' >&2; exit 1; }
   if ! git -C "$app/source" cat-file -e "$revision^{commit}" 2>/dev/null; then
@@ -497,7 +504,12 @@ if ! (cd "$release" && runuser -u "$account" -- python3 -m variational_grid chec
   echo 'A valid login session is needed for quantity-specific indicative quotes; public candles and statistics do not require one.'
   echo 'Paste only the vr-token cookie when prompted (input is hidden). No wallet private key is needed.'
   # /dev/tty keeps this interactive even when the installer arrives through curl | bash.
-  (cd "$release" && runuser -u "$account" -- python3 -m variational_grid init-session --config "$conf/$config_name" </dev/tty)
+  if [[ ${VARIATIONAL_SESSION_STDIN:-0} == 1 ]]; then
+    [[ -t 0 ]] || { echo 'A terminal is required to import vr-token; rerun the deployment from an interactive SSH terminal.' >&2; exit 1; }
+    (cd "$release" && runuser -u "$account" -- python3 -m variational_grid init-session --config "$conf/$config_name")
+  else
+    (cd "$release" && runuser -u "$account" -- python3 -m variational_grid init-session --config "$conf/$config_name" </dev/tty)
+  fi
 fi
 # All market runners reload the protected session file without a restart.
 if [[ $mode == compare ]]; then
@@ -557,7 +569,7 @@ PY
 engine_key=$({
   printf '%s\n' "$settings_key"
   python3 --version
-  git -C "$app/source" ls-tree -r "$revision" -- variational_grid | sed '\|[[:space:]]variational_grid/web/|d; \|[[:space:]]variational_grid/dashboard.py$|d'
+  git -C "$app/source" ls-tree -r "$revision" -- variational_grid | sed '\|[[:space:]]variational_grid/web/|d; \|[[:space:]]variational_grid/dashboard.py$|d; \|[[:space:]]variational_grid/hub.py$|d'
 } | sha256sum | cut -d ' ' -f1)
 web_key=$({
   printf '%s\n' "$settings_key"
@@ -683,7 +695,7 @@ if [[ $mode != run ]]; then
   echo '  ssh -N -T -o ExitOnForwardFailure=yes -o ServerAliveInterval=15 -o ServerAliveCountMax=6 -L 127.0.0.1:18765:127.0.0.1:9876 USER@SERVER_IP'
   echo 'Then open http://127.0.0.1:18765/ in your browser. No public web port is required.'
   echo 'Keep using an existing tunnel after upgrade; do not open another on the same local port.'
-  echo 'Windows reconnect helper: https://github.com/hxx344/variational-cl-bz-grid#ssh-tunnel-recovery'
+  echo 'Windows reconnect helper: https://github.com/hxx344/variational-grid#ssh-tunnel-recovery'
   echo 'A dashboard restart may briefly interrupt HTTP; an SSH Connection reset requires reconnecting the SSH transport.'
   echo 'Dashboard logs: journalctl -u variational-grid-web -f'
 fi

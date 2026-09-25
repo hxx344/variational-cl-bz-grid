@@ -50,7 +50,7 @@ class InstallTests(unittest.TestCase):
             ("/etc/variational-grid", self.conf),
             ("/var/lib/variational-grid", self.state),
             ("/etc/systemd/system", units),
-            ("https://github.com/hxx344/variational-cl-bz-grid.git", self.source),
+            ("https://github.com/hxx344/variational-grid.git", self.source),
         ):
             installer = installer.replace(original, str(replacement))
         # CI need not be root. All absolute install targets above are in this temp dir.
@@ -157,6 +157,40 @@ if name == "runuser":
 
     def restarts(self):
         return [call[-1] for call in self.calls() if call[:2] == ['systemctl', 'restart']]
+
+    def test_stack_missing_terminal_stops_before_service_activation(self):
+        self.env.update(VARIATIONAL_SESSION_STDIN='1', GRID_INSTALL_TEST_MISSING_SESSION='1')
+        result = self.install(expected=1)
+        self.assertIn('A terminal is required', result.stderr)
+        self.assertEqual(self.restarts(), [])
+        self.assertFalse((self.app / 'current').exists())
+
+    def test_stack_detached_terminal_can_import_a_missing_session(self):
+        import pty
+        master, slave = pty.openpty()
+        self.addCleanup(os.close, master)
+        self.addCleanup(os.close, slave)
+        self.env.update(VARIATIONAL_SESSION_STDIN='1', GRID_INSTALL_TEST_MISSING_SESSION='1')
+        result = subprocess.run(['bash', str(self.script)], env=self.env, stdin=slave,
+                                capture_output=True, text=True, start_new_session=True, timeout=60)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertIn('Fixture: hidden session import completed', result.stdout)
+        self.assertTrue((self.app / 'current').exists())
+
+    def test_rename_migrates_only_the_known_legacy_remote(self):
+        self.install()
+        checkout = self.app / 'source'
+        legacy = 'https://github.com/hxx344/variational-cl-bz-grid.git'
+        subprocess.check_call(['git', '-C', str(checkout), 'remote', 'set-url', 'origin', legacy])
+        self.log.write_text('')
+        result = self.install()
+        self.assertIn('Updated the renamed repository remote', result.stdout)
+        remote = subprocess.check_output(['git', '-C', str(checkout), 'remote', 'get-url', 'origin'], text=True).strip()
+        self.assertEqual(remote, str(self.source))
+        self.assertEqual(self.restarts(), [])
+        subprocess.check_call(['git', '-C', str(checkout), 'remote', 'set-url', 'origin', 'https://github.com/other/project.git'])
+        result = self.install(expected=1)
+        self.assertIn('Unexpected existing source remote', result.stderr)
 
     def test_repeat_skips_package_fetch_archive_tests_and_restarts(self):
         self.install()

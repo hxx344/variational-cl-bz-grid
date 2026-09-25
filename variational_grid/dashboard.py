@@ -22,6 +22,7 @@ from .reset import control_lock, read_state, request_reset
 
 WINDOWS = {"1h": 3600, "24h": 86400, "7d": 604800}
 ASSETS = {"/": ("index.html", "text/html; charset=utf-8"),
+          "/hub.js": ("hub.js", "text/javascript; charset=utf-8"),
           "/app.js": ("app.js", "text/javascript; charset=utf-8"),
           "/model.js": ("model.js", "text/javascript; charset=utf-8"),
           "/styles.css": ("styles.css", "text/css; charset=utf-8")}
@@ -275,6 +276,12 @@ def make_server(experiment, port=9876):
                 if parsed.path in routes:
                     filename, mime = routes[parsed.path]
                     return self.reply(200, (assets / filename).read_bytes(), mime, head)
+                if parsed.path == "/api/hub/summary":
+                    if parsed.query not in {"", "schemaVersion=2"}:
+                        return self.reply(400, b"Unsupported summary version", head=head)
+                    from .hub import read_summary
+                    payload = json.dumps(read_summary(experiment), ensure_ascii=False, allow_nan=False).encode()
+                    return self.reply(200, payload, "application/json; charset=utf-8", head)
                 if parsed.path == "/api/dashboard":
                     query = parse_qs(parsed.query)
                     window = query.get("range", ["24h"])[0]

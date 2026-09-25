@@ -1,4 +1,4 @@
-# 跨品种网格与对冲模拟
+# Variational Grid · 跨品种网格与对冲模拟
 
 提供 CL/BZ 价差网格、CL/BZ 库存组合，以及 **Lighter QQQ 只做多挂单剥头皮 + Variational US100 对冲**三种独立纸面策略。QQQ 模式取消新开仓距离门槛，对照三种止盈比例，共三组，统一净敞口阈值 3000 USDC，单组最多 30 个批次、每批 1000 USDC；部署和统计口径见文末。
 
@@ -7,6 +7,20 @@ CL/BZ 模式从 Variational Omni 的前端接口读取真实行情，在本地�
 **仅获取公开行情不需要令牌。** 2026-09-19 无 Cookie 实测：前端 K 线、合约元数据以及官方公开 `GET /metadata/stats` 均返回 200，CL/BZ 的 `POST /api/quotes/indicative` 返回 403；同一报价接口使用现有会话成功。CL/BZ 模式选择后一种按数量报价，并在启动时检查登录状态，所以仍需令牌。官方公开统计也有买卖价，但按固定名义金额分档，文档允许最长 600 秒缓存；不能直接当成按当前每腿桶数取得的实时成交报价。QQQ 模式现已切换为 Var token 鉴权报价，Lighter 侧仍读取公开行情，详见文末。
 
 程序只支持 `paper`。CL/BZ 客户端只允许会话检查、合约元数据、K 线、指示性报价四种接口；QQQ 模式另读取 Lighter 公开盘口和逐笔成交。**没有真实下单、撤单、转账或提款功能**。资金、挂单与仓位完全属于本地模拟账本。
+
+## 工作台入口
+
+仓库现名为 `variational-grid`（原 `variational-cl-bz-grid`）。现有安装器会把已知旧远端迁移到新地址；配置、会话、账本、服务名和现有策略模式继续保留。
+
+同机部署 [Project Aggregation 工作台](https://github.com/hxx344/project-aggregation) 时，可用一条命令更新两个项目：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/hxx344/project-aggregation/main/install-all.sh | sudo bash -s -- --only variational,hub
+```
+
+工作台自动添加 `Variational Grid`，通过服务器 `127.0.0.1:9876` 显示原始页面；只需转发工作台 `3100`。项目管理无需填写用户名、密码或行情 token；原模块保持只监听本机，通过工作台访问时由工作台登录和页面授权保护。首次安装默认 CL/BZ 三组对照，已有策略模式保留；首次/令牌失效时在 SSH 终端按提示隐藏输入 `vr-token`。
+
+新增只读 `GET /api/hub/summary?schemaVersion=2`（无参数也返回 v2）：仅取最新发布采样和进程状态，不调用行情、不读取 token、不扫描历史或各组仓位。各组本轮累计模拟盈亏分别显示，单位 USDC，不计入工作台真实资产；暂停、停止、过期、重置及合成行情均保留相应状态。QQQ 摘要时间同时受已有 US100 仓位估值时间限制。三种监控页在工作台中隐藏时暂停前台刷新，重新进入立即补查，后台模拟继续运行。
 
 ## 直接运行
 
@@ -162,7 +176,7 @@ python -m http.server 0 --bind 127.0.0.1 --directory data/comparison-pct-05-1-2-
 适用于 Debian 12+ / Ubuntu 24.04+、systemd：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/hxx344/variational-cl-bz-grid/main/install.sh | sudo bash -s -- --compare
+curl -fsSL https://raw.githubusercontent.com/hxx344/variational-grid/main/install.sh | sudo bash -s -- --compare
 ```
 
 这一条命令会自动安装 Python 与 Git、下载并验证代码、创建独立服务账户、配置开机启动和失败后自动重启，并启动 **0.5% / 1% / 2% 三组对照模拟**。首次安装只需按提示粘贴 `vr-token`（隐藏输入），不需要钱包私钥。重复执行同一命令升级，保留配置、会话与账本。部署前后自动回收旧代码，通常只保留当前版本和一份可回退版本；网页或引擎仍在运行的更早版本会额外保留，等相关服务正常升级后再回收。新版本预检失败时不会切换正在运行的代码，未启用的失败候选与本轮临时目录自动清理。
@@ -180,7 +194,7 @@ curl -fsSL https://raw.githubusercontent.com/hxx344/variational-cl-bz-grid/main/
 只回收旧部署、无需升级或重启服务时，可执行：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/hxx344/variational-cl-bz-grid/main/install.sh | sudo bash -s -- --cleanup
+curl -fsSL https://raw.githubusercontent.com/hxx344/variational-grid/main/install.sh | sudo bash -s -- --cleanup
 ```
 
 清理不会删除 `/etc/variational-grid`、`/var/lib/variational-grid` 中的配置、会话、账本、历史实验或迁移备份。早期部署没有成功标记，首次清理会保守保留一份较新的已验证旧代码及实际运行版本；此后的新部署仅把成功完成的版本作为回退候选。现有单个 Git 源码缓存继续复用，不使用全局缓存清理。
@@ -286,7 +300,7 @@ python -m variational_grid compare-reset --experiments inventory.example.json --
 在 Linux 服务器执行一条命令，即可安装或切换到库存模式：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/hxx344/variational-cl-bz-grid/main/install.sh | sudo bash -s -- --inventory
+curl -fsSL https://raw.githubusercontent.com/hxx344/variational-grid/main/install.sh | sudo bash -s -- --inventory
 ```
 
 首次创建 `/etc/variational-grid/inventory.json`，并将现有 `config.json` 复制为独立的 `/etc/variational-grid/inventory-base.json`，保存基础资金、数量、费用及杠杆。登录会话仍指向原文件；之后切换旧模式不会改变库存模拟的经济参数。独立数据目录为 `/var/lib/variational-grid/inventory-pct-0-5-10-20-v1/`。库存策略参数由 `inventory.json` 保存，不执行旧价差网格迁移，不改写旧配置和账本。修改经济参数时需使用新 `output_dir`，不能把不同参数下的结果混在原账本中；页面重置用于相同参数下重新开始。
@@ -375,7 +389,7 @@ HTTP冷却独立于缓存可用性。每次Var请求占用3秒预算，429后6�
 ### 一键部署与升级
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/hxx344/variational-cl-bz-grid/main/install.sh | sudo bash -s -- --qqq-hedge
+curl -fsSL https://raw.githubusercontent.com/hxx344/variational-grid/main/install.sh | sudo bash -s -- --qqq-hedge
 ```
 
 此次仅切换行情认证，已有 v2 三组配置、持仓和损益继续累计，不重置账本。安装器复用 `/etc/variational-grid/config.json` 的 `session_file`（默认 `/var/lib/variational-grid/session.json`），缺失或过期时在服务器终端隐藏输入 vr-token。运行中更新该文件后自动恢复，无需重启。
@@ -411,7 +425,7 @@ python -m variational_grid compare-reset --experiments qqq-hedge.example.json --
 在**自己电脑的 PowerShell** 执行，替换 `USER@SERVER_IP`。下面保留本地 **9876**，浏览器继续访问 `http://127.0.0.1:9876/`；如果原本使用本地 18765，将末尾端口改为 18765。首次换用脚本前，先在旧隧道窗口按 Ctrl+C；脚本不会关闭占用端口的其他进程。
 
 ```powershell
-$tunnelScript = Join-Path $env:TEMP 'variational-dashboard-tunnel.ps1'; Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/hxx344/variational-cl-bz-grid/main/scripts/dashboard-tunnel.ps1' -OutFile $tunnelScript; powershell.exe -NoProfile -ExecutionPolicy Bypass -File $tunnelScript -SshHost USER@SERVER_IP -LocalPort 9876
+$tunnelScript = Join-Path $env:TEMP 'variational-dashboard-tunnel.ps1'; Invoke-WebRequest -UseBasicParsing 'https://raw.githubusercontent.com/hxx344/variational-grid/main/scripts/dashboard-tunnel.ps1' -OutFile $tunnelScript; powershell.exe -NoProfile -ExecutionPolicy Bypass -File $tunnelScript -SshHost USER@SERVER_IP -LocalPort 9876
 ```
 
 已有本地仓库也可直接运行 `powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\scripts\dashboard-tunnel.ps1 -SshHost USER@SERVER_IP -LocalPort 9876`。SSH 别名、认证方式和服务器端口沿用用户已有 SSH 配置；特殊 SSH 端口可加 `-SshPort 2222`。不修改全局执行策略或 SSH 配置，不保存密码或私钥，不关闭主机指纹检查。密码、MFA 或腾讯云微信扫码登录在重连时可能需要再次操作；只有服务器允许密钥或 ssh-agent 无交互认证时，才能完整自动恢复，脚本不会绕过登录要求。保留窗口，Ctrl+C 停止脚本；此本机改动无需重新部署服务器。
