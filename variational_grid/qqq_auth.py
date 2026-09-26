@@ -16,6 +16,7 @@ class VarSession:
         self.confirmed = False
         self.rejected = False
         self.error = ""
+        self.state = "pending"
 
     def read(self):
         try:
@@ -24,24 +25,29 @@ class VarSession:
             token, agent = self.client.session()
         except GridError:
             self.confirmed = False
+            self.state = "unavailable"
             self.error = "Var 会话缺失、过期或不可读；请使用 init-session 更新 vr-token"
             raise SessionUnavailable(self.error) from None
         identity = hashlib.sha256(token.encode()).digest()
         if identity != self._identity:
             self._identity, self.confirmed, self.rejected = identity, False, False
         if self.rejected:
+            self.state = "rejected"
             self.error = "Var 会话被拒绝（HTTP 401/403）；请使用 init-session 更新 vr-token"
             raise SessionUnavailable(self.error)
+        self.state = "confirmed" if self.confirmed else "pending"
         self.error = "" if self.confirmed else "等待 Var token 鉴权报价确认"
         return token, agent
 
     def reject(self):
         self.confirmed, self.rejected = False, True
+        self.state = "rejected"
         self.error = "Var 会话被拒绝（HTTP 401/403）；请使用 init-session 更新 vr-token"
         raise SessionUnavailable(self.error)
 
     def accept(self):
         self.confirmed, self.error = True, ""
+        self.state = "confirmed"
 
     def cache_allowed(self):
         try:

@@ -73,6 +73,10 @@ class RequestDeferred(GridError):
         super().__init__(f"{venue} {path}：{state}，约 {wait} 秒后重试")
 
 
+class MarketClosed(GridError):
+    """A validated trading-session boundary, not an authentication failure."""
+
+
 def retry_delay(header, now, fallback):
     """Honor both Retry-After formats; never truncate a server's longer delay."""
     try:
@@ -412,6 +416,19 @@ Authenticated /quotes/indicative supplies quantity-specific indicative prices.
         self._metadata_checked = None
         self._last_quote = None
 
+    def market_observation(self, now):
+        """Describe known trading availability independently of token/quote age."""
+        market = self._market or {}
+        observed, closes = market.get("metadata_ts"), market.get("closes_at")
+        state = "unknown"
+        if observed is not None and _fresh(observed, now, 120):
+            if market.get("market_open") is False or closes is not None and now >= closes:
+                state = "closed"
+            elif market.get("market_open") is True and closes is not None:
+                state = "close_only" if market.get("close_only") else "open"
+        return {"market_state": state, "market_source_ts": observed,
+                "market_max_age_seconds": 120, "market_closes_at": closes}
+
     def _metadata(self):
         self.session.read()
         self.transport.check_cooldown()
@@ -474,7 +491,7 @@ Authenticated /quotes/indicative supplies quantity-specific indicative prices.
         quantity = _number(qty)
         market = self._metadata()
         if not market["market_open"] or (market["closes_at"] is not None and self.transport.clock() >= market["closes_at"]):
-            raise GridError("US100 swap market is closed")
+            raise MarketClosed("US100 swap market is closed")
         path = "/api/quotes/indicative"
         data, received, _ = self.transport.request("POST", path,
             body={"instrument": dict(VAR_INSTRUMENT), "qty": _text(quantity)}, probe=_probe)
@@ -488,7 +505,7 @@ Authenticated /quotes/indicative supplies quantity-specific indicative prices.
             if not _fresh(quote_ts, received, self.max_age_seconds):
                 raise GridError("US100 indicative quote is stale")
             if market["closes_at"] is not None and received >= market["closes_at"]:
-                raise GridError("US100 swap market closed during quote request")
+                raise MarketClosed("US100 swap market closed during quote request")
             limits = {}
             for side in ("bid", "ask"):
                 item = data["qty_limits"][side]

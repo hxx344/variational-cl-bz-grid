@@ -10,6 +10,8 @@ CL/BZ 模式从 Variational Omni 的前端接口读取真实行情，在本地�
 
 全量审阅结果见 [Var 模块审核](docs/var-audit-2026-09-26.md)。QQQ / US100 另提供 [离线执行故障演练](docs/execution-readiness.md)，运行 `python -m variational_grid.execution_drill` 验证重启对账、幂等和风险预留。未来 Variational 交易采用前端 `vr-token` 路径；真实交易协议仍待核实，演练不连接账户。
 
+US100 休市时暂停新开仓和 Var 调仓，等待开市及有效报价；休市本身不表示 token 失效。QQQ 已有止盈仍按有效 Lighter 行情处理，因此 Var 空头可能暂时无法同步回补。页面分别展示市场状态、鉴权状态和报价时效，不会用休市前的旧报价确认刚更新的 token；超过 120 秒的市场观测显示“状态待刷新”，不会自动推断已开市。
+
 ## 工作台入口
 
 仓库现名为 `variational-grid`（原 `variational-cl-bz-grid`）。现有安装器会把已知旧远端迁移到新地址；配置、会话、账本、服务名和现有策略模式继续保留。

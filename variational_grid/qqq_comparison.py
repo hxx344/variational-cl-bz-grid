@@ -351,8 +351,8 @@ class QQQMarketFeed:
         var, status = self.reference.read()
         now = time.time()
         # Quote retrieval may take time; never refresh the source timestamp.
-        var = self.reference.usable(now)
-        status.update(available=var is not None, age_seconds=max(0, now - status["source_ts"]) if status["source_ts"] is not None else None)
+        var, status = self.reference.status(now, cache_used=status["cache_used"], error=status["refresh_error"],
+                                          error_kind=status["refresh_error_kind"])
         reason = q.get("reason", "")
         if not q["ready"] or not -2 <= now - q["ts"] <= self.experiment.settings.max_quote_age_seconds:
             var, reason = None, reason or "QQQ observation delayed; account known fills and defer new decisions"

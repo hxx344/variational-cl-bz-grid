@@ -4,7 +4,7 @@ import json
 import math
 
 from .models import GridError, dec
-from .qqq_market import VAR_SYMBOL, VAR_QUOTE_SOURCE
+from .qqq_market import MarketClosed, VAR_SYMBOL, VAR_QUOTE_SOURCE
 
 
 @dataclass(frozen=True)
@@ -115,6 +115,7 @@ class ReferenceCache:
     def read(self):
         now = self.client.transport.clock()
         current, cache_used, error = self.usable(now), True, self.restore_error
+        error_kind = ""
         if current is None or now - current["ts"] > self.policy.refresh_after_seconds:
             try:
                 refreshed = self.client.quote("0.01")
@@ -124,16 +125,26 @@ class ReferenceCache:
                 error, self.restore_error = "", ""
             except GridError as failure:
                 error = str(failure)
+                error_kind = "market_closed" if isinstance(failure, MarketClosed) else ""
             finally:
                 self.save()  # Also persist an observed market closure after a failed quote.
         now = self.client.transport.clock()
-        current = self.usable(now)
         self.save()  # Copy inherited state only after the new cohort exists.
+        return self.status(now, cache_used=cache_used, error=error, error_kind=error_kind)
+
+    def status(self, now, *, cache_used, error, error_kind=""):
+        # Re-evaluate at the final frame time too: a slow request cannot extend
+        # the quote or the independently observed market's lifetime.
+        current = self.usable(now)
         status = {**asdict(self.policy), "source_ts": self.quote["ts"] if self.quote else None,
                   "source_qty": self.quote["qty"] if self.quote else None, "cache_used": cache_used,
                   "age_seconds": max(0, now - self.quote["ts"]) if self.quote else None,
-                  "available": current is not None, "refresh_error": error,
+                  "available": current is not None, "refresh_error": error, "refresh_error_kind": error_kind,
                   "authentication": "vr-token", "authenticated": self.client.session.confirmed,
+                  "authentication_state": self.client.session.state,
+                  "authentication_checked_at": now,
+                  "authentication_error": self.client.session.error if self.client.session.state in {"rejected", "unavailable"} else "",
+                  **self.client.market_observation(now),
                   "source": self.quote.get("source") if self.quote else None}
         if not self.client.session.confirmed and not error:
             status["refresh_error"] = self.client.session.error or error

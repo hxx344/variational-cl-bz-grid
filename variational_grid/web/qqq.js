@@ -132,13 +132,31 @@
   function referenceStatus(data, elapsedSeconds = 0) {
     const cache = data?.summary?.market?.quote_cache;
     if (!cache || cache.mode !== 'shared_indicative_v1') return null;
-    const age = M.finite(cache.source_ts) && M.finite(data.server_ts) ? Math.max(0, Number(data.server_ts) + Math.max(0, elapsedSeconds) - Number(cache.source_ts)) : null;
+    const now = M.finite(data.server_ts) ? Number(data.server_ts) + Math.max(0, elapsedSeconds) : null;
+    const age = M.finite(cache.source_ts) && now !== null ? Math.max(0, now - Number(cache.source_ts)) : null;
     const waitingSession = cache.authentication === 'vr-token' && M.finite(data?.var_session?.updated_ts)
       && (!M.finite(cache.source_ts) || Number(cache.source_ts) <= Number(data.var_session.updated_ts) + 2);
-    const usable = !waitingSession && cache.available === true && age !== null && age <= Number(cache.max_age_seconds);
+    const structured = typeof cache.market_state === 'string';
+    const marketAge = M.finite(cache.market_source_ts) && now !== null ? now - Number(cache.market_source_ts) : null;
+    const marketFresh = marketAge !== null && marketAge >= -2 && M.finite(cache.market_max_age_seconds) && marketAge <= Number(cache.market_max_age_seconds);
+    let marketState = structured ? (marketFresh ? cache.market_state : 'unknown') : null;
+    if (['open','close_only'].includes(marketState) && M.finite(cache.market_closes_at) && now >= Number(cache.market_closes_at)) marketState = 'closed';
+    const newerSession = M.finite(data?.var_session?.updated_ts) && (!M.finite(cache.authentication_checked_at) || Number(data.var_session.updated_ts) > Number(cache.authentication_checked_at));
+    const authFailure = !newerSession && ['rejected','unavailable'].includes(cache.authentication_state);
+    const usable = !waitingSession && !authFailure && (!structured || ['open','close_only'].includes(marketState)) && cache.available === true && age !== null && age <= Number(cache.max_age_seconds);
     const label = age === null ? '等待首份参考报价' : !usable ? `参考价不可用 · 报价已有 ${Math.floor(age)} 秒` : `${cache.cache_used ? '缓存估算' : '共享参考价估算'} · 报价已有 ${Math.floor(age)} 秒`;
-    const auth = waitingSession ? '等待新 token 报价' : cache.authentication === 'vr-token' ? (cache.authenticated ? 'Var token 已验证' : 'Var token 未就绪') : '';
-    return {age, usable, label:auth ? `${auth} · ${label}` : label, limit:cache.max_age_seconds, error:cache.refresh_error || ''};
+    const auth = authFailure ? (cache.authentication_state === 'rejected' ? 'Var 会话被拒绝，请更新 token' : 'Var 会话缺失、过期或不可读') : waitingSession ? '等待新 token 报价' : cache.authentication === 'vr-token' ? (cache.authenticated ? 'Var token 已验证' : 'Var token 未就绪') : '';
+    let error = newerSession && cache.authentication_error ? '' : cache.refresh_error || '';
+    if (cache.refresh_error_kind === 'market_closed') error = '最近一次报价请求遇到休市，等待开市后获取新报价';
+    if (authFailure) error = cache.authentication_error || error;
+    let resultLabel = auth ? `${auth} · ${label}` : label;
+    if (marketState === 'closed') {
+      resultLabel = 'US100 休市 · 暂停新开仓';
+      if (authFailure) resultLabel += ` · ${auth}`;
+      else if (waitingSession || cache.authentication_state === 'pending') resultLabel += ' · 待开市后确认当前 token 报价';
+    } else if (marketState === 'unknown') resultLabel = `US100 市场状态待刷新 · ${resultLabel}`;
+    else if (marketState === 'close_only') resultLabel = `US100 仅允许减仓 · 暂停新开仓 · ${resultLabel}`;
+    return {age, usable, marketState, label:resultLabel, limit:cache.max_age_seconds, error};
   }
   function fillPricing(row) {
     if (row?.reason === 'taker_take_profit') return `${row.time_in_force === 'IOC' ? 'IOC 小额限价止盈' : 'GTT 限价止盈'} · 可见买盘逐档模拟 · 盘口 ${M.date(row.quote_source_ts)}`;
@@ -192,8 +210,9 @@
     if (disconnected) notice = '无法连接监控服务，保留上次成功读取的数据。页面会自动重试。';
     else if (runtime === 'stopped') notice = '模拟进程已停止，以下为最后保存的数据。';
     else if (runtime === 'paused') notice = '行情暂停，保留最近有效采样：' + sourceReason(data.runtime.reason);
-    else if (cooldown) notice = cooldown + (reference?.usable && s?.market?.source_status === 'ready' ? `。${reference.label}，模拟继续。` : '。暂停新开仓，保留已有仓位和已确认的模拟成交。');
     else if (f.stale) notice = '行情已过期，收益和仓位估值停留在最后有效采样。';
+    else if (reference?.marketState === 'closed') notice = `${reference.label}。US100 暂不能调仓；QQQ 止盈继续按 Lighter 有效行情处理，已有空头可能暂时无法同步回补。${cooldown || reference.error}`;
+    else if (cooldown) notice = cooldown + (reference?.usable && s?.market?.source_status === 'ready' ? `。${reference.label}，模拟继续。` : '。暂停新开仓，保留已有仓位和已确认的模拟成交。');
     else if (reference && !reference.usable) notice = `${reference.label}。${reference.error || '等待刷新'}；缓存最长使用 ${reference.limit} 秒。`;
     else if (reference?.error && s?.market?.source_status === 'ready') notice = `刷新暂缓，${reference.label}，模拟继续。${reference.error}`;
     else if (s?.market?.gap) notice = '公共成交序列存在缺口；保留已知仓位与损益，暂停新开仓。';

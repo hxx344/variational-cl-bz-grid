@@ -379,6 +379,80 @@ test('saving a token does not relabel an older quote as the new session confirma
   assert.match(Q.referenceStatus(data).label,/Var token 已验证/);
 });
 
+function closedReference(overrides = {}, updated = 150) {
+  return {server_ts:200,var_session:{updated_ts:updated},summary:{ts:200,market:{quote_cache:{
+    mode:'shared_indicative_v1',source_ts:100,max_age_seconds:60,available:false,
+    authentication:'vr-token',authenticated:false,authentication_state:'pending',authentication_checked_at:200,
+    market_state:'closed',market_source_ts:198,market_max_age_seconds:120,market_closes_at:null,
+    refresh_error_kind:'market_closed',refresh_error:'US100 swap market is closed',...overrides}}}};
+}
+
+test('closure leads the reason even after token rotation or before the first quote', () => {
+  for (const source_ts of [100,null]) {
+    const result = Q.referenceStatus(closedReference({source_ts}));
+    assert.equal(result.usable,false);
+    assert.equal(result.marketState,'closed');
+    assert.match(result.label,/^US100 休市 · 暂停新开仓/);
+    assert.match(result.label,/待开市后确认当前 token 报价/);
+    assert.doesNotMatch(result.label,/等待新 token 报价|请更新|过期|不可读/);
+    assert.doesNotMatch(result.error,/swap market is closed/);
+  }
+});
+
+test('closure retains independent auth rejection, expiry and rate-limit evidence', () => {
+  for (const state of ['rejected','unavailable']) {
+    const data = closedReference({authentication_state:state,authentication_error:'鉴权失败',refresh_error_kind:'',refresh_error:'鉴权失败'});
+    const result = Q.referenceStatus(data);
+    assert.match(result.label,/US100 休市/);
+    assert.match(result.label,state === 'rejected' ? /会话被拒绝/ : /会话缺失、过期或不可读/);
+    assert.equal(result.error,'鉴权失败');
+    assert.equal(result.usable,false);
+  }
+  const limited = Q.referenceStatus(closedReference({refresh_error_kind:'',refresh_error:'HTTP 429 限流'}));
+  assert.match(limited.label,/US100 休市/);
+  assert.match(limited.error,/429/);
+});
+
+test('market observation expires in the browser without inventing a market reopening', () => {
+  const data = closedReference();
+  const expired = Q.referenceStatus(data,119);
+  assert.equal(expired.marketState,'unknown');
+  assert.match(expired.label,/市场状态待刷新/);
+  assert.doesNotMatch(expired.label,/US100 休市/);
+  assert.equal(expired.usable,false);
+  data.summary.market.quote_cache.market_source_ts = 205;
+  assert.equal(Q.referenceStatus(data).marketState,'unknown');
+});
+
+test('known closing boundary freezes a previously usable reference', () => {
+  const data = closedReference({market_state:'open',market_source_ts:200,market_closes_at:201,
+    source_ts:200,available:true,authenticated:true,authentication_state:'confirmed',refresh_error_kind:'',refresh_error:''},150);
+  assert.equal(Q.referenceStatus(data).usable,true);
+  const closed = Q.referenceStatus(data,1);
+  assert.equal(closed.marketState,'closed');
+  assert.equal(closed.usable,false);
+});
+
+test('opening does not validate an old quote or a newly stored session', () => {
+  const data = closedReference({market_state:'open',market_closes_at:500,available:true,authenticated:true,authentication_state:'confirmed'});
+  assert.equal(Q.referenceStatus(data).usable,false);
+  assert.match(Q.referenceStatus(data).label,/等待新 token 报价/);
+  data.summary.market.quote_cache.source_ts = 199;
+  assert.equal(Q.referenceStatus(data).usable,true);
+  assert.match(Q.referenceStatus(data).label,/Var token 已验证/);
+  data.summary.market.quote_cache.market_state = 'close_only';
+  assert.match(Q.referenceStatus(data).label,/仅允许减仓 · 暂停新开仓/);
+});
+
+test('a rejected previous session cannot label a newer token as rejected', () => {
+  const data = closedReference({authentication_checked_at:100,authentication_state:'rejected',authentication_error:'old rejection',refresh_error:'old rejection',refresh_error_kind:''});
+  const result = Q.referenceStatus(data);
+  assert.equal(result.usable,false);
+  assert.match(result.label,/待开市后确认/);
+  assert.doesNotMatch(result.label,/被拒绝|请更新/);
+  assert.equal(result.error,'');
+});
+
 test('dust IOC is a priced exit attempt and does not masquerade as blocked entries', () => {
   const row = {scalper:{model:'perp_dex_scalper_v3',phase:'opening',take_profit_blockers:[],small_take_profits:[{slot:56,quantity:'0.0008',limit:'743.4'}]}};
   const status = Q.scalperStatus(row);
