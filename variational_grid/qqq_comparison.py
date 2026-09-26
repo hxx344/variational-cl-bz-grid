@@ -16,10 +16,11 @@ from types import SimpleNamespace
 from .comparison import Cohort, write_json
 from .models import D, GridError, dec, utc
 from .qqq_hedge import QQQConfig, QQQEngine, QQQSettings, QQQStore, digest, encoded, hedge_target
-from .qqq_market import RequestDeferred
+from .qqq_market import MarketClosed, RequestDeferred
 from .qqq_pricing import QQQPricing, ReferenceCache, source_valid, reference_price
 from .qqq_auth import SessionUnavailable
 from .qqq_scalper import SAFETY_POLICY, ScalperSettings
+from .qqq_pause import PAIR_PAUSE_POLICY, VENUE_STATES, close_times
 
 
 def summary_record(summary):
@@ -147,6 +148,12 @@ class QQQFrame:
         if not math.isfinite(self.ts) or self.ts <= 0 or self.data_kind not in {"synthetic", "live_indicative"} or set(self.plans) != set(experiment.scenarios):
             raise GridError("Invalid QQQ shared observation")
         q = self.market["lighter"]
+        if "pair_pause_policy" in self.market and self.market["pair_pause_policy"] != PAIR_PAUSE_POLICY:
+            raise GridError("Unknown QQQ pair pause policy")
+        if "var_market_state" in self.market and self.market["var_market_state"] not in VENUE_STATES:
+            raise GridError("Invalid QQQ pair venue state")
+        if "pair_pause_policy" in self.market:
+            close_times(self.market)
         if "scalper_safety_policy" in q and q["scalper_safety_policy"] != SAFETY_POLICY:
             raise GridError("Unknown QQQ scalper safety policy")
         if "take_profit_policy" in q:
@@ -230,6 +237,7 @@ class QQQCohort(Cohort):
         return QQQFrame.decode(raw)
 
     def prepare_frame(self, ts, market, quotes=None, data_kind="live_indicative"):
+        market = {**market, "pair_pause_policy": PAIR_PAUSE_POLICY}
         if self.experiment.scalper is not None and self.experiment.scalper.gtt_take_profit:
             from .qqq_execution import TAKE_PROFIT_POLICY
             # Version observations, not the economic identity: old pending frames
@@ -240,7 +248,7 @@ class QQQCohort(Cohort):
         for name, engine in self.engines.items():
             account, _ = engine.prepare(market, ts)
             var = market["var"]
-            target = hedge_target(account, market["lighter"]["mark"], var["mark"], engine.config, var["size_step"]) if var else dec(account["us100"]["qty"])
+            target = hedge_target(account, market["lighter"]["mark"], var["mark"], engine.config, var["size_step"]) if var and not account.get("pair_pause", {}).get("active") else dec(account["us100"]["qty"])
             plans[name] = {"before": digest(self.stores[name].account()), "target": str(target)}
         return QQQFrame(ts, market, quotes or {}, plans, data_kind)
 
@@ -266,6 +274,7 @@ class QQQCohort(Cohort):
         if previous and previous["ts"] > frame.ts:
             raise GridError("Cannot publish an older QQQ observation")
         q, v = frame.market["lighter"], frame.market["var"]
+        paused = next((r["pair_pause"] for r in rows if r.get("pair_pause", {}).get("active")), None)
         summary = {"kind": "qqq_hedge", "mode": "qqq_hedge_comparison", "ts": frame.ts, "time_utc": utc(frame.ts),
                    "started_utc": previous["started_utc"] if previous else utc(frame.ts), "sample_count": previous["sample_count"] + 1 if previous else 1,
                    "poll_seconds": self.experiment.settings.poll_seconds, "data_kind": frame.data_kind,
@@ -276,8 +285,8 @@ class QQQCohort(Cohort):
                               "qqq_source_ts": q.get("source_ts", q["ts"]), "qqq_source_time_kind": q.get("source_time_kind", "observed"),
                               "var_source_ts": v["ts"] if v else None,
                               "var_source": v.get("source") if v else None,
-                              "source_status": "ready" if frame.market["allow_entries"] else "paused_entries",
-                              "source_reason": frame.market.get("reason", ""), "gap": q["gap"]}}
+                              "source_status": "pair_paused" if paused else "ready" if frame.market["allow_entries"] else "paused_entries",
+                              "source_reason": paused["reason"] if paused else frame.market.get("reason", ""), "gap": q["gap"]}}
         if "pricing_policy" in frame.market:
             previous_start = previous.get("pricing_since_utc") if previous and previous.get("pricing") == frame.market["pricing_policy"] else None
             summary.update(pricing=frame.market["pricing_policy"], pricing_since_utc=previous_start or utc(frame.ts))
@@ -286,7 +295,8 @@ class QQQCohort(Cohort):
             summary["scalper"] = asdict(self.experiment.scalper)
         with self.db:
             self.db.execute("INSERT INTO summaries VALUES (?,?)", (frame.ts, summary_record(summary)))
-        self.set_runtime("running" if frame.market["allow_entries"] else "degraded", frame.market.get("reason") or None)
+        self.set_runtime("paused" if paused else "running" if frame.market["allow_entries"] else "degraded",
+                         paused["reason"] if paused else frame.market.get("reason") or None)
         return summary
 
     def report(self):
@@ -348,7 +358,7 @@ class QQQMarketFeed:
             self.save_cooldowns()
 
     def _next_shared(self, cohort):
-        q = self.lighter.snapshot()
+        q = self.lighter_snapshot(cohort)
         var, status = self.reference.read()
         now = time.time()
         # Quote retrieval may take time; never refresh the source timestamp.
@@ -378,12 +388,16 @@ class QQQMarketFeed:
         return frame
 
     def _next(self, cohort):
-        q = self.lighter.snapshot()
-        reason, var = q.get("reason", ""), None
+        q = self.lighter_snapshot(cohort)
+        reason, var, var_state, closes_at = q.get("reason", ""), None, "unknown", None
         try:
             var = self.var.market()
+            closes_at = var.get("closes_at")
+            var_state = "closed" if not var.get("market_open", True) else "close_only" if var.get("close_only", False) else "open"
             if not var.get("market_open", True):
                 reason, var = "US100 market closed; maker entries paused", None
+        except MarketClosed as error:
+            reason, var_state = str(error), "closed"
         except GridError as error:
             reason = str(error)
         now = time.time()
@@ -396,7 +410,8 @@ class QQQMarketFeed:
             reason, var = "QQQ observation delayed; account known fills and defer new decisions", None
         if q.get("close_only", False) or (var or {}).get("close_only", False):
             reason = "Venue in close-only mode; maker entries paused"
-        market = {"lighter": q, "var": var, "allow_entries": bool(var and q["ready"] and not q["gap"] and not q.get("close_only", False) and not var.get("close_only", False)), "reason": reason}
+        market = {"lighter": q, "var": var, "var_market_state": var_state, "var_market_closes_at": closes_at,
+                  "allow_entries": bool(var and q["ready"] and not q["gap"] and not q.get("close_only", False) and not var.get("close_only", False)), "reason": reason}
         frame = cohort.prepare_frame(now, market)
         quantities = {}
         names = list(frame.plans)
@@ -420,6 +435,9 @@ class QQQMarketFeed:
             except SessionUnavailable as error:
                 market.update(var=None, reason=str(error), allow_entries=False)
                 break
+            except MarketClosed as error:
+                market.update(var=None, var_market_state="closed", reason=str(error), allow_entries=False)
+                break
             except GridError as error:
                 market.update(reason=str(error), allow_entries=False)
                 self._quote_cursor = (names.index(name) + 1) % len(names)
@@ -428,15 +446,44 @@ class QQQMarketFeed:
         # Network latency is observable. Rebuild targets at the final observation time;
         # use only quotes actually fetched for the resulting exact signed change.
         now = time.time()
+        observer = getattr(self.var, "market_observation", None)
+        if observer:
+            observed = observer(now)
+            market.update(var_market_state=observed["market_state"], var_market_closes_at=observed.get("market_closes_at"))
+        if var and var.get("closes_at") is not None and now >= var["closes_at"]:
+            market["var_market_state"] = "closed"
+        if market["var_market_state"] == "closed":
+            market.update(var=None, allow_entries=False, reason="US100 market closed; both legs paused")
         if now - q["ts"] > settings.max_quote_age_seconds or (var and (now - var["ts"] > settings.max_quote_age_seconds or abs(q["ts"] - var["ts"]) > settings.max_pair_skew_seconds)):
             market.update(var=None, allow_entries=False, reason="US100 quote expired while gathering hedge prices")
         frame = cohort.prepare_frame(now, market)
         if market["var"]:
+            needed = {format(abs(dec(plan["target"]) - dec(cohort.stores[name].account()["us100"]["qty"])).normalize(), "f")
+                      for name, plan in frame.plans.items()}
             for key, quote in collected.items():
-                if quote and -2 <= now - quote["ts"] <= settings.max_quote_age_seconds and abs(q["ts"] - quote["ts"]) <= settings.max_pair_skew_seconds:
+                if key in needed and key != "0" and quote and -2 <= now - quote["ts"] <= settings.max_quote_age_seconds and abs(q["ts"] - quote["ts"]) <= settings.max_pair_skew_seconds:
                     frame.quotes[key] = quote
         frame.validate(self.experiment)
         return frame
+
+    def lighter_snapshot(self, cohort):
+        try:
+            return self.lighter.snapshot()
+        except GridError as error:
+            # A failed book read must not prevent a known closure cancelling orders.
+            # The last journal supplies valuation only, with its original source time.
+            row = cohort.db.execute("SELECT payload FROM frames ORDER BY ts DESC LIMIT 1").fetchone()
+            if row is None:
+                raise
+            q = QQQFrame.decode(row[0]).market["lighter"]
+            q = {**q, "ready": False, "gap": True, "trades": [], "reason": str(error)}
+            observer = getattr(self.lighter, "market_observation", None)
+            if observer:
+                state = observer(time.time())
+                q["metadata_ts"] = state["market_source_ts"]
+                if state["market_state"] != "unknown":
+                    q.update(market_open=state["market_state"] != "closed", close_only=state["market_state"] == "close_only")
+            return q
 
 
 def run_qqq(args, experiment):

@@ -10,6 +10,18 @@
   const isScalper = value => isScalperModel(value?.scalper?.model);
   const distanceFree = value => ['perp_dex_scalper_v2','perp_dex_scalper_v3'].includes(value?.scalper?.model);
   const gttExits = value => value?.scalper?.model === 'perp_dex_scalper_v3';
+  const pairPaused = row => row?.pair_pause?.active === true || row?.scalper?.phase === 'pair_paused';
+  const marketPairPaused = data => data?.summary?.market?.source_status === 'pair_paused' || (data?.summary?.scenarios || []).some(pairPaused);
+  const pairPauseReason = (row, data) => data?.summary?.market?.source_reason || row?.pair_pause?.reason || data?.runtime?.reason || (data?.summary?.scenarios || []).find(pairPaused)?.pair_pause?.reason;
+  const scheduledPairPause = (row, data) => pairPauseReason(row, data) === 'Scheduled market close within 5 minutes; both legs paused';
+  const pairPauseLabel = (row, data) => scheduledPairPause(row, data) ? '休市前暂停' : '休市联动暂停';
+  const pairPauseDetail = (row, data) => scheduledPairPause(row, data) ? '休市前5分钟暂停，开仓及止盈挂单已撤销，持仓保留；等待下一交易时段及双侧新报价' : '开仓及止盈挂单已撤销，持仓保留，等待双侧开市及新报价';
+  const sourceReason = value => ({'Synthetic demonstration; not a historical backtest':'合成行情演示，用于查看模拟行为，不是历史回测。','US100 market closed; maker entries paused':'US100 市场关闭，暂停新开仓。','US100 quote stale; maker entries paused':'US100 报价过期，暂停新开仓。','US100 quote expired while gathering hedge prices':'收集对冲报价期间 US100 报价过期，等待有效行情。','Lighter QQQ market closed; both legs paused':'Lighter QQQ 休市，双腿暂停。','Variational US100 market closed; both legs paused':'Variational US100 休市，双腿暂停。','Both markets closed; both legs paused':'两侧市场均休市，双腿暂停。','Scheduled market close within 5 minutes; both legs paused':'距预定休市不超过5分钟，双腿已提前暂停并撤单。','Waiting for both markets and fresh post-closure quotes':'等待双侧市场开市，并取得休市后的新报价。'}[value] || value || '等待数据恢复');
+  function pairPauseNotice(data) {
+    if (!marketPairPaused(data)) return '';
+    const reason = pairPauseReason(null, data);
+    return `${pairPauseLabel(null, data)} · ${pairPauseDetail(null, data)}。${reason ? sourceReason(reason) : ''}`;
+  }
   const seconds = value => M.finite(value) ? Number(value).toLocaleString('en-US', {maximumFractionDigits:1}) + ' 秒' : '—';
   const profitTarget = row => row?.scalper?.take_profit_percent ?? row?.take_profit_percent ?? row?.grid_step_percent;
   const label = row => row ? `${isScalper(row) ? '剥头皮' : '网格'} ${distanceFree(row) ? 'TP ' + percent(profitTarget(row),2) : percent(row.grid_step_percent,2)} / 对冲 ${hedgeLimit(row)}` : '未知账户';
@@ -18,6 +30,13 @@
   function scalperStatus(row) {
     if (!isScalper(row)) return null;
     const s = row.scalper;
+    if (pairPaused(row)) return {
+      phase:pairPauseLabel(row),
+      exitDetail:(s.suspended_take_profits || []).map(b => `批次 ${M.number(b.slot,0)}：止盈暂停，持仓 ${M.number(b.quantity,6)} QQQ，目标 ${M.number(b.price,4)} USDC`).join('；'),
+      waiting:scheduledPairPause(row) ? '等待下一交易时段及双侧新报价' : '等待双侧开市及新报价', gate:scheduledPairPause(row) ? '休市前5分钟暂停并撤单，持仓保留' : '开仓及止盈挂单已撤销，持仓保留',
+      orders:`开仓 ${M.number(s.active_entries,0)} / 1 · TP ${M.number(s.active_take_profits,0)} · 占用 ${M.number(s.occupied_batches,0)} / ${M.number(s.max_batches,0)} 批`,
+      prices:'联动暂停期间暂停评估开仓价格', pending:true
+    };
     const phases = {market_gap:'QQQ 行情过期或存在缺口，暂停开仓',entry_paused:'行情受限，暂停开仓',awaiting_fill:'开仓单等待成交',cancel_pending:'等待撤单确认',cooling_down:'等待开仓冷却',grid_blocked:'价格距离不足',capacity_full:'批次已满，暂停开仓',post_only_wait:'等待可挂 Maker 的价格',opening:'已提交模拟开仓单',take_profit_pending:'等待挂出独立止盈单'};
     return {
       phase:gttExits(row) && s.phase === 'take_profit_pending' ? '止盈单未挂出，暂停开仓' : phases[s.phase] || '等待开仓状态',
@@ -43,6 +62,13 @@
     const clockKnown = valid(data?.server_ts) && valid(summary?.ts) && Number(data.server_ts) >= Number(summary.ts);
     const age = clockKnown ? Number(data.server_ts) - Number(summary.ts) + elapsed : null;
     const stale = age !== null && age > Math.max(60, valid(summary?.poll_seconds) ? Number(summary.poll_seconds) * 3 : 60);
+    if (pairPaused(row) || marketPairPaused(data)) {
+      const pauseLabel = pairPauseLabel(row, data);
+      return {mode:'paused', value:pauseLabel, percent:null, remaining:null, total:null, frozen:true,
+        detail:pairPauseDetail(row, data),
+        basis:disconnected ? `采样值 · 连接中断，保留${pauseLabel}状态` : stale ? `采样值 · 采样已过期，保留${pauseLabel}状态` : !clockKnown ? `采样值 · 采样时间未提供，保留${pauseLabel}状态` : `末次采样${pauseLabel} · 等待恢复采样`
+      };
+    }
     const reference = referenceStatus(data, elapsed);
     const frozen = disconnected ? '连接中断' : data?.runtime?.status !== 'running' ? '服务未正常运行' : !clockKnown ? '采样时间未提供' : stale ? '采样已过期' : market?.gap || !['ready','ok','running','live','live_indicative','synthetic'].includes(market?.source_status) || ['market_gap','entry_paused'].includes(s.phase) ? '行情受限' : reference && !reference.usable ? '参考报价不可用' : '';
     const basis = frozen ? `采样值 · ${frozen}，暂停推算` : '倒计时估算 · 开仓以策略采样为准';
@@ -95,17 +121,18 @@
     const age = data?.summary ? Math.max(0, serverAge + (now - received) / 1000) : null;
     const stale = age !== null && age > Math.max(60, Number(data.summary.poll_seconds || 0) * 3);
     const runtime = data?.runtime?.status;
-    const names = {running:'模拟运行中', degraded:'部分行情可用', paused:'行情暂停', stopped:'模拟已停止', starting:'等待行情', resetting:'正在重置'};
+    const names = {running:'模拟运行中', degraded:'部分行情可用', paused:marketPairPaused(data) ? pairPauseLabel(null, data) : '行情暂停', stopped:'模拟已停止', starting:'等待行情', resetting:'正在重置'};
     return {age, stale, label:disconnected ? '页面连接中断' : stale ? '行情已过期' : names[runtime] || '等待有效行情', warning:disconnected || stale || runtime !== 'running'};
   }
   function marketStatus(data, freshnessState, disconnected) {
     if (!data?.summary) return '等待行情';
     const source = data.summary.market?.source_status;
-    const previous = ({ok:'末次行情可用',ready:'末次行情可用',running:'末次行情可用',live:'末次公共行情可用',live_indicative:'末次公共行情 / 指示性报价',synthetic:'末次合成行情演示',paused_entries:'末次行情受限 · 暂停新开仓',paused:'末次行情暂停',stale:'末次行情过期',partial:'末次行情部分缺失',offline:'末次行情离线',gap:'末次行情存在缺口',waiting:'等待行情'}[source] || '末次行情状态未知');
+    const previous = ({ok:'末次行情可用',ready:'末次行情可用',running:'末次行情可用',live:'末次公共行情可用',live_indicative:'末次公共行情 / 指示性报价',synthetic:'末次合成行情演示',paused_entries:'末次行情受限 · 暂停新开仓',pair_paused:`末次采样${pairPauseLabel(null, data)}`,paused:'末次行情暂停',stale:'末次行情过期',partial:'末次行情部分缺失',offline:'末次行情离线',gap:'末次行情存在缺口',waiting:'等待行情'}[source] || '末次行情状态未知');
     const prefix = disconnected ? '连接中断' : freshnessState.stale ? '已过期' : ({stopped:'已停止',paused:'已暂停',resetting:'正在重置'}[data.runtime?.status]);
     return prefix ? `${prefix} · ${previous}` : previous;
   }
   function hedgeStatus(row) {
+    if (pairPaused(row) || row?.hedge_status === 'pair_paused') return `${pairPauseLabel(row)} · 保留两腿仓位，暂停对冲调整`;
     const statuses = {
       quantity_rounding_residual:'数量精度尾差 · 保留实际敞口',
       var_close_only:'待对冲 · US100 仅允许减仓',
@@ -151,7 +178,7 @@
     if (authFailure) error = cache.authentication_error || error;
     let resultLabel = auth ? `${auth} · ${label}` : label;
     if (marketState === 'closed') {
-      resultLabel = 'US100 休市 · 暂停新开仓';
+      resultLabel = marketPairPaused(data) ? 'US100 休市 · 双腿暂停' : 'US100 休市 · 暂停新开仓';
       if (authFailure) resultLabel += ` · ${auth}`;
       else if (waitingSession || cache.authentication_state === 'pending') resultLabel += ' · 待开市后确认当前 token 报价';
     } else if (marketState === 'unknown') resultLabel = `US100 市场状态待刷新 · ${resultLabel}`;
@@ -163,7 +190,7 @@
     if (row?.pricing_mode === 'shared_indicative_v1') return `${row.cache_used ? '缓存参考价估算' : '共享参考价估算'} · 报价龄 ${M.number(row.quote_age_seconds, 1)} 秒 · 源数量 ${M.number(row.source_qty, 6)}${row.half_spread_percent == null ? '' : ' · 半点差 ' + percent(row.half_spread_percent, 4)}`;
     return row?.venue === 'Variational' ? '原精确数量报价' : isScalperModel(row?.maker_model) ? '剥头皮 · 严格 Maker 队列模拟' : 'Maker 队列模拟';
   }
-  const helpers = {percent, label, isScalper, distanceFree, strategyTitle, entryDistanceRule, seconds, scalperStatus, entryProgress, fillReason, encoding, reconciliation, sampleIndex, exposureDomain, dollarExposureDomain, dollarHedge, hedgeLimit, historyValue, freshness, marketStatus, hedgeStatus, cooldownNotice, referenceStatus, fillPricing};
+  const helpers = {percent, label, isScalper, distanceFree, strategyTitle, entryDistanceRule, seconds, scalperStatus, entryProgress, fillReason, encoding, reconciliation, sampleIndex, exposureDomain, dollarExposureDomain, dollarHedge, hedgeLimit, historyValue, freshness, marketStatus, hedgeStatus, cooldownNotice, referenceStatus, fillPricing, pairPauseNotice};
   if (typeof module !== 'undefined' && module.exports) {module.exports = helpers; return;}
   root.QQQModel = helpers;
   const $ = id => document.getElementById(id), E = M.escape;
@@ -179,7 +206,6 @@
   const rowLabel = name => label(allRows().find(r => r.name === name));
   const cls = row => {const e = encoding(row); return `s${e.color} d${e.dash}`;};
   const pnl = value => `<span class="${M.tone(value)}">${M.signed(value, 2)}</span>`;
-  const sourceReason = value => ({'Synthetic demonstration; not a historical backtest':'合成行情演示，用于查看模拟行为，不是历史回测。','US100 market closed; maker entries paused':'US100 市场关闭，暂停新开仓。','US100 quote stale; maker entries paused':'US100 报价过期，暂停新开仓。','US100 quote expired while gathering hedge prices':'收集对冲报价期间 US100 报价过期，等待有效行情。'}[value] || value || '等待数据恢复');
   function setState(change, push = true) {
     if (change.range && change.range !== state.range) historyDue = 0;
     state = {...state, ...change}; page = 0;
@@ -211,9 +237,10 @@
     if (reference) $('us100-source-time').textContent = `${M.date(s?.market?.var_source_ts ?? s?.market?.quote_cache?.source_ts)} · ${reference.label}`;
     if (disconnected) notice = connectionError + '保留上次成功读取的数据。页面会自动重试。';
     else if (runtime === 'stopped') notice = '模拟进程已停止，以下为最后保存的数据。';
+    else if (marketPairPaused(data)) notice = pairPauseNotice(data) + (f.stale ? '采样已过期，以下为最后保存的状态。' : '');
     else if (runtime === 'paused') notice = '行情暂停，保留最近有效采样：' + sourceReason(data.runtime.reason);
     else if (f.stale) notice = '行情已过期，收益和仓位估值停留在最后有效采样。';
-    else if (reference?.marketState === 'closed') notice = `${reference.label}。US100 暂不能调仓；QQQ 止盈继续按 Lighter 有效行情处理，已有空头可能暂时无法同步回补。${cooldown || reference.error}`;
+    else if (reference?.marketState === 'closed') notice = `${reference.label}。等待双侧开市及新报价；联动暂停与撤单状态以末次策略采样为准。${cooldown || reference.error}`;
     else if (cooldown) notice = cooldown + (reference?.usable && s?.market?.source_status === 'ready' ? `。${reference.label}，模拟继续。` : '。暂停新开仓，保留已有仓位和已确认的模拟成交。');
     else if (reference && !reference.usable) notice = `${reference.label}。${reference.error || '等待刷新'}；缓存最长使用 ${reference.limit} 秒。`;
     else if (reference?.error && s?.market?.source_status === 'ready') notice = `刷新暂缓，${reference.label}，模拟继续。${reference.error}`;
@@ -362,6 +389,7 @@
           ['开仓资格',distanceFree(data.summary) ? '首次无需冷却；待止盈批次数比上次决策减少时，本轮免冷却；仍须满足行情、容量、止盈覆盖和 Maker 挂单条件' : '首次可立即开仓；待止盈批次数比上次决策减少时，本轮免冷却；价格条件失败也消耗本轮豁免，仍须满足容量'],
           ['开仓改价',`${seconds(config.reprice_after_seconds)} 后允许改价，每 ${seconds(config.reprice_poll_seconds)} 检查；按实际采样处理`],
           ['占用容量','已有持仓与待成交开仓占用批次；达到上限时暂停新开仓'],
+          ['休市联动','任一侧预定休市前5分钟，两腿暂停并撤销模拟开仓及止盈挂单；遇实际休市同样暂停，持仓保留，等待下一交易时段双侧开市及新报价再恢复'],
           ['逐批止盈','开仓完全成交，或部分成交后撤单确认，再为已成交数量挂独立 TP'],
           ['开仓取价','盘口中价与最小已有 TP 减一 tick 取较小值；按 tick 四舍五入，并限制在最优卖价减一 tick 以内'],
           ['止盈取价','本批入场价格 × (1 + TP%)，按 tick 向下取整'],

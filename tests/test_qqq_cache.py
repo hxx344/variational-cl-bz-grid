@@ -135,6 +135,41 @@ class CacheTests(unittest.TestCase):
         self.assertIsNone(self.cache.usable(NOW + 191))
         self.assertIsNone(self.cache.usable(self.client._market["closes_at"]))
 
+    def test_short_closure_never_reuses_preclosure_cache_even_after_open_metadata(self):
+        self.cache.read()
+        self.now[0] += 4
+        self.source.closed = True
+        self.client._metadata_checked = None
+        self.assertIsNone(self.cache.read()[0])
+        self.assertIsNone(self.client._last_quote)
+        self.assertEqual(json.loads(self.path.read_text())["market"]["quote_valid_after"], NOW + 4)
+        self.now[0] += 4
+        self.source.closed, self.source.failure = False, "network"
+        self.client._metadata_checked = None
+        current, status = self.cache.read()
+        self.assertIsNone(current)
+        self.assertEqual(status["market_state"], "open")
+        self.assertEqual(status["source_ts"], NOW)
+        self.source.failure, self.source.lag = None, 12
+        self.now[0] += 4
+        self.assertIsNone(self.cache.read()[0])  # A delayed post-close response is still old.
+        self.now[0] += 4
+        self.source.lag = 0
+        self.assertEqual(self.cache.read()[0]["ts"], self.now[0])
+
+    def test_exact_quantity_market_cannot_reuse_last_quote_after_short_closure(self):
+        self.client.market()
+        self.now[0] += 1
+        self.source.closed = True
+        self.client._metadata_checked = None
+        self.assertFalse(self.client.market()["market_open"])
+        self.now[0] += 3
+        self.source.closed = False
+        self.client._metadata_checked = None
+        current = self.client.market()
+        self.assertEqual(current["ts"], self.now[0])
+        self.assertEqual(len(self.source.posts), 2)
+
     def test_known_close_only_state_is_inherited_by_cached_reference(self):
         self.cache.read()
         self.source.close_only = True

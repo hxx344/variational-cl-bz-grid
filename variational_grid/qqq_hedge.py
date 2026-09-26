@@ -309,18 +309,26 @@ class QQQEngine:
         self.config, self.store = config, store
 
     def prepare(self, market, ts):
-        return maker_step(self.store.account(), market["lighter"], ts, self.config, market["allow_entries"])
+        from .qqq_pause import pair_step
+        return pair_step(self.store.account(), market, ts, self.config)
 
     def calculate(self, frame, plan):
         before = self.store.account()
         if digest(before) != plan["before"]:
             raise GridError("QQQ plan does not match account state")
-        account, fills = maker_step(before, frame.market["lighter"], frame.ts, self.config, frame.market["allow_entries"])
+        from .qqq_pause import pair_step
+        account, fills = pair_step(before, frame.market, frame.ts, self.config)
         var, settings = frame.market["var"], self.config.settings
+        paused = account.get("pair_pause", {}).get("active", False)
         qmark = dec(frame.market["lighter"]["mark"])
         pending, reason = False, "inside_band"
         if var is not None:
             account["last_var_mark"], account["last_var_ts"] = var["mark"], var["ts"]
+        if paused:
+            if dec(plan["target"]) != dec(account["us100"]["qty"]):
+                raise GridError("Paused QQQ pair cannot change the hedge target")
+            pending, reason = True, "pair_paused"
+        elif var is not None:
             target = hedge_target(account, qmark, var["mark"], self.config, var["size_step"])
             change = target - dec(account["us100"]["qty"])
             if str(target) != plan["target"]:
@@ -389,6 +397,8 @@ class QQQEngine:
             snapshot["hedge_threshold_usdc"] = self.config.hedge_threshold_usdc
         if self.config.scalper is not None:
             snapshot["scalper"] = account["scalper"]["status"]
+        if "pair_pause" in account:
+            snapshot["pair_pause"] = account["pair_pause"]
         if "pricing_policy" in frame.market:
             snapshot["pricing_stats"] = {key: account.get(key, 0) for key in ("reference_price_fills", "cached_price_fills", "max_reference_age_seconds")}
         return account, fills, snapshot

@@ -147,7 +147,7 @@ class MarketStateTests(unittest.TestCase):
         self.assertIsNotNone(quote)
         self.assertEqual(status["market_state"], "close_only")
 
-    def test_closed_var_keeps_short_while_qqq_tp_and_inflight_entry_are_accounted(self):
+    def test_closed_var_cancels_both_order_types_and_preserves_both_legs_until_reopening(self):
         output = self.root / "paper"
         cfg = replace(config(), state_file=str(output / "a.sqlite3"), hedge_threshold_usdc="1",
                       scalper=ScalperSettings(model=CURRENT_MODEL))
@@ -170,25 +170,31 @@ class MarketStateTests(unittest.TestCase):
             self.assertFalse(frame.market["allow_entries"])
             self.assertEqual(frame.market["quote_cache"]["market_state"], "closed")
             self.assertEqual(frame.quotes, {})
-            self.assertEqual(D(closed["qqq"]["qty"]), 0)
+            self.assertEqual(D(closed["qqq"]["qty"]), 2)
             self.assertEqual(closed["us100"]["qty"], short)
-            self.assertEqual(closed["hedge_status"], "var_market_unavailable")
-            self.assertLess(D(closed["net_exposure_usdc"]), 0)
+            self.assertEqual(closed["hedge_status"], "pair_paused")
+            self.assertEqual(closed["resting_orders"], 0)
+            self.assertEqual(closed["pair_pause"]["cancelled_entries"], 1)
+            self.assertEqual(closed["pair_pause"]["cancelled_take_profits"], 1)
             _, inflight = advance(cohort, 33, [trade(2, NOW + 31.2, "100", "1"), trade(3, NOW + 31.4, "100", "7")])
-            self.assertEqual(D(inflight["qqq"]["qty"]), 1)
+            self.assertEqual(D(inflight["qqq"]["qty"]), 2)
             self.assertEqual(inflight["scalper"]["active_entries"], 0)
             _, exited = advance(cohort, 35, crossed=True)
-            self.assertEqual(D(exited["qqq"]["qty"]), 0)
+            self.assertEqual(D(exited["qqq"]["qty"]), 2)
             self.assertEqual(exited["us100"]["qty"], short)
             self.assertEqual(len(self.source.posts), 1)
             self.source.closed = False
             frame, reopened = advance(cohort, 62)
             self.assertTrue(frame.market["allow_entries"])
-            # The existing dollar-band strategy targets half the threshold,
-            # rather than guaranteeing an exactly flat residual position.
-            self.assertLess(abs(D(reopened["us100"]["qty"])), abs(D(short)))
-            self.assertLessEqual(abs(D(reopened["net_exposure_usdc"])), D(cfg.hedge_threshold_usdc))
-            self.assertGreater(reopened["hedge_adjustments"], exited["hedge_adjustments"])
+            self.assertFalse(reopened["pair_pause"]["active"])
+            self.assertEqual(D(reopened["qqq"]["qty"]), 2)
+            self.assertEqual(reopened["us100"]["qty"], short)
+            self.assertEqual(reopened["scalper"]["active_take_profits"], 1)
+            _, filled = advance(cohort, 64, crossed=True)
+            self.assertEqual(D(filled["qqq"]["qty"]), 0)
+            self.assertLess(abs(D(filled["us100"]["qty"])), abs(D(short)))
+            self.assertLessEqual(abs(D(filled["net_exposure_usdc"])), D(cfg.hedge_threshold_usdc))
+            self.assertGreater(filled["hedge_adjustments"], exited["hedge_adjustments"])
 
 
 if __name__ == "__main__":

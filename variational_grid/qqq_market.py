@@ -258,6 +258,13 @@ class LighterClient:
         self._cursor_ts = None
         self._last_poll = None
         self._needs_anchor = True
+        self._market = None
+
+    def market_observation(self, now):
+        market = self._market or {}
+        known = market.get("metadata_ts") is not None and _fresh(market["metadata_ts"], now, self.max_metadata_age_seconds)
+        state = ("closed" if not market["market_open"] else "close_only" if market["close_only"] else "open") if known else "unknown"
+        return {"market_state": state, "market_source_ts": market.get("metadata_ts")}
 
     @staticmethod
     def _metadata(data):
@@ -345,6 +352,8 @@ class LighterClient:
     def _snapshot(self):
         details, _, details_ts = self.transport.request("GET", "/api/v1/orderBookDetails", query={"market_id": LIGHTER_MARKET_ID})
         result = self._metadata(details)
+        # Retain known closure even when the following empty book/read fails.
+        self._market = {**result, "metadata_ts": details_ts}
         book, _, book_ts = self.transport.request("GET", "/api/v1/orderBookOrders", query={"market_id": LIGHTER_MARKET_ID, "limit": 250})
         bids, asks = self._book(book)
         raw_trades, now, trades_ts = self.transport.request("GET", "/api/v1/recentTrades", query={"market_id": LIGHTER_MARKET_ID, "limit": 100})
@@ -463,9 +472,15 @@ Authenticated /quotes/indicative supplies quantity-specific indicative prices.
                     raise GridError("US100 swap trading session is invalid")
                 if opens <= received < closes:
                     current_session, closes_at = True, closes
+            previous = self._market or {}
+            valid_after = previous.get("quote_valid_after")
+            market_open = row["market_status"] == "open" and current_session
+            if not market_open or previous and previous.get("closes_at") != closes_at:
+                valid_after = received
+                self._last_quote = None
             self._market = {"symbol": VAR_SYMBOL, "display_symbol": "US100", "instrument_type": "swap",
                             "multiplier": "1", "quantity_unit": "index_unit", "mark": _text(_number(row["price"])),
-                            "market_open": row["market_status"] == "open" and current_session,
+                            "market_open": market_open, "quote_valid_after": valid_after,
                             "closes_at": closes_at, "close_only": row["is_close_only_mode"],
                             "funding_status": "missing", "funding_rate": None,
                             "dividends_status": "not_accrued", "metadata_ts": source_ts}
@@ -481,8 +496,11 @@ Authenticated /quotes/indicative supplies quantity-specific indicative prices.
         # Any fresh, validated US100 quote can provide the common mark/limits.
         # Preserve its original time; actual simulated hedge fills still require
         # a newly requested exact-quantity quote in that frame.
-        if self.session.cache_allowed() and self._last_quote and _fresh(self._last_quote["ts"], self.transport.clock(), min(9, self.max_age_seconds)):
-            return {**self._last_quote, **{k: market[k] for k in ("market_open", "closes_at", "close_only")},
+        if (self.session.cache_allowed() and self._last_quote
+                and self._last_quote["ts"] >= (market.get("quote_valid_after") or 0)
+                and self._last_quote.get("closes_at") == market["closes_at"]
+                and _fresh(self._last_quote["ts"], self.transport.clock(), min(9, self.max_age_seconds))):
+            return {**self._last_quote, **{k: market[k] for k in ("market_open", "closes_at", "close_only", "metadata_ts")},
                     "is_probe": True, "probe_qty": self._last_quote["qty"]}
         quote = self.quote("0.01", _probe=True)
         return {**quote, "is_probe": True, "probe_qty": quote["qty"]}

@@ -64,6 +64,9 @@ def source_valid(quote, market):
         close = market["closes_at"]
         if close is not None and (type(close) not in (int, float) or not math.isfinite(close) or close <= 0):
             return False
+        after = market.get("quote_valid_after")
+        if after is not None and (type(after) not in (int, float) or not math.isfinite(after) or after <= 0):
+            return False
         return quote["ts"] <= quote["received_ts"] + 2
     except (KeyError, TypeError, ValueError, GridError):
         return False
@@ -100,6 +103,8 @@ class ReferenceCache:
         if not (-2 <= now - quote["ts"] <= self.policy.max_age_seconds and -2 <= now - market["metadata_ts"] <= 120):
             return None
         if not market["market_open"] or market["closes_at"] is None or now >= market["closes_at"]:
+            return None
+        if quote["ts"] < (market.get("quote_valid_after") or 0) or quote.get("closes_at") != market["closes_at"]:
             return None
         return {**quote, **{k: market[k] for k in ("market_open", "closes_at", "close_only", "metadata_ts")}}
 

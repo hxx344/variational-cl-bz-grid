@@ -331,6 +331,10 @@ python -m variational_grid inventory-demo --output output/inventory-divergence -
 
 ## Lighter QQQ 剥头皮与 US100 对冲：三组
 
+**休市联动优先于下文的普通开仓、止盈和行情过期处理。** 从交易所返回的交易时段取得休市时间，在进入休市前 **5 分钟**窗口的采样先暂停双腿，撤销本策略全部未成交模拟开仓单和止盈单（包括部分入场余单、待激活 GTT、小额 IOC 和撤单中的订单），不再消费该帧逐笔或执行 US100 对冲。已成交的两腿数量、成本和历史保留，不把撤单当成平仓。当前 Var 提供 US100 交易时段；Lighter QQQ 的公开 metadata 未提供可用的休市日程，因此按 Var 日程提前暂停双方，Lighter 独立停市在检测到后立即暂停，不套用现货美股时间。
+
+暂停锁写入现有账本，重复采样、升级和重启均保留；须等下一交易时段、双方开市且取得收市点之后的新报价，才能重建订单。未知/过期行情、只减仓模式、成交缺口和休市前缓存不能解锁，剩余交易时间不超过 5 分钟也不恢复。恢复的 TP 按原批次目标价及实际持仓数量重新提交，开仓仍检查原有冷却、容量和 Maker 条件；订单重新计时排队，不复活旧订单或补造休市期间成交。新采样记录 `market_closure_cancel_v1` 执行口径，旧未完成采样按原口径恢复；不迁移或清空现有账本。页面明确区分“休市前暂停”和“休市联动暂停”，主动撤掉的 TP 不显示为挂单失败。
+
 三个独立模拟账户分别使用 **0.05% / 0.1% / 0.2%** 止盈比例，新开仓不再要求与已有批次保持价格距离；QQQ 只做多，最多 30 个占用批次，每批计划 1,000 USDC。US100 用于按需对冲，每组统一 **3,000 USDC 净敞口阈值**。参数见 `qqq-hedge.example.json`，各组独立保存两腿损益、持仓、成交数量和成交额。`grid_step_percent` 保留用于历史配置兼容及缺省 TP，v2/v3 不用它判断新开仓资格。
 
 新模型 `perp_dex_scalper_v3` 保留 v2 取消开仓距离门槛的规则，并修复止盈单被严格 Maker 限制拦截的问题。开仓、等待与逐批止盈参考 [perp-dex-tools 的 TradingBot](https://github.com/your-quantguy/perp-dex-tools/blob/4679a339b8cdc9998707feeda3c5d8b84fb8681f/trading_bot.py) 和 [Lighter 适配器](https://github.com/your-quantguy/perp-dex-tools/blob/4679a339b8cdc9998707feeda3c5d8b84fb8681f/exchanges/lighter.py)：一次只挂一张近盘口开仓单，成交后逐批挂独立止盈。30 指最多占用批次，并非同时预挂 30 张买单。下一笔开仓价根据当时盘口计算，批次编号单调递增。

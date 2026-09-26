@@ -251,6 +251,132 @@ test('first entry and waived wait are distinct from a timed cooldown and retain 
   assert.equal(waived.remaining,null);
 });
 
+test('pair closure suppresses entry readiness until a resumed strategy sample is published', () => {
+  for (const phase of ['pair_paused','opening','take_profit_pending','cooling_down']) {
+    const row = progressRow({phase,cooldown_waived:true,cooldown_remaining_seconds:0,next_entry_at:null,active_entries:1});
+    if (phase !== 'pair_paused') row.pair_pause = {active:true};
+    const p = Q.entryProgress(row,progressData(),120);
+    assert.equal(p.mode,'paused');
+    assert.equal(p.value,'休市联动暂停');
+    assert.equal(p.percent,null);
+    assert.equal(p.remaining,null);
+    assert.equal(p.total,null);
+    assert.equal(p.frozen,true);
+    assert.match(p.detail,/开仓及止盈挂单已撤销，持仓保留，等待双侧开市及新报价/);
+    assert.match(p.basis,/采样已过期/);
+    assert.match(Q.entryProgress(row,progressData(),0,true).basis,/连接中断/);
+  }
+  const row = {...progressRow(),pair_pause:{active:false,resumed_at:1000}};
+  assert.equal(Q.entryProgress(row,progressData()).mode,'timed');
+  assert.equal(Q.entryProgress(row,progressData()).frozen,false);
+  assert.equal(Q.entryProgress(row,progressData()).percent,50);
+  const waiting = progressData({runtime:{status:'paused'},summary:{ts:1000,poll_seconds:2,market:{source_status:'pair_paused',quote_cache:{mode:'shared_indicative_v1',available:true,source_ts:1000,max_age_seconds:60}}}});
+  assert.equal(Q.referenceStatus(waiting).usable,true);
+  assert.equal(Q.entryProgress(row,waiting).mode,'paused');
+});
+
+test('suspended exits preserve positions and targets without reporting missing or active take profits', () => {
+  const row = {pair_pause:{active:true},hedge_pending:true,hedge_status:'hedge_quote_unavailable',scalper:{
+    model:'perp_dex_scalper_v3',phase:'take_profit_pending',cooldown_waived:true,
+    active_entries:0,active_take_profits:0,occupied_batches:1,max_batches:30,
+    suspended_take_profits:[{slot:2,quantity:'0.01',price:'743.4'}],
+    take_profit_blockers:[{slot:2,quantity:'0.01',reason:'below_min_notional'}],
+    partial_entries:[{slot:2,quantity:'0.01',take_profit_submitted_quantity:0}],
+    small_take_profits:[{slot:2,quantity:'0.01',limit:'743.4'}],take_profits_in_flight:1
+  }};
+  const status = Q.scalperStatus(row);
+  assert.equal(status.phase,'休市联动暂停');
+  assert.equal(status.pending,true);
+  assert.equal(status.waiting,'等待双侧开市及新报价');
+  assert.equal(status.orders,'开仓 0 / 1 · TP 0 · 占用 1 / 30 批');
+  assert.match(status.gate,/开仓及止盈挂单已撤销，持仓保留/);
+  assert.match(status.exitDetail,/批次 2：止盈暂停，持仓 0\.010000 QQQ，目标 743\.4000 USDC/);
+  assert.doesNotMatch(JSON.stringify(status),/止盈单未挂出|未覆盖|等待提交|仍在处理|限价 IOC|已跳过冷却/);
+  assert.equal(Q.hedgeStatus(row),'休市联动暂停 · 保留两腿仓位，暂停对冲调整');
+  assert.equal(Q.hedgeStatus({hedge_status:'pair_paused',hedge_pending:false}),Q.hedgeStatus(row));
+  row.pair_pause.active = false;
+  row.scalper.phase = 'pair_paused';
+  assert.equal(Q.scalperStatus(row).phase,'休市联动暂停');
+  row.scalper.phase = 'take_profit_pending';
+  assert.match(Q.scalperStatus(row).phase,/止盈单未挂出/);
+  assert.match(Q.scalperStatus(row).exitDetail,/未达最小下单金额/);
+  assert.equal(Q.hedgeStatus(row),'待对冲 · 对冲报价不可用');
+});
+
+test('pair pause status remains distinct from stale, offline and recovered samples', () => {
+  const data = {summary:{poll_seconds:5,market:{source_status:'pair_paused'}},runtime:{status:'paused'}};
+  const fresh = Q.freshness(data,0,1000,2000,false);
+  assert.equal(fresh.label,'休市联动暂停');
+  assert.equal(fresh.warning,true);
+  assert.equal(fresh.age,1);
+  assert.equal(Q.marketStatus(data,fresh,false),'已暂停 · 末次采样休市联动暂停');
+  const stale = Q.freshness(data,50,1000,12000,false);
+  assert.equal(stale.label,'行情已过期');
+  assert.equal(Q.marketStatus(data,stale,false),'已过期 · 末次采样休市联动暂停');
+  const offline = Q.freshness(data,50,1000,12000,true);
+  assert.equal(offline.label,'页面连接中断');
+  assert.equal(Q.marketStatus(data,offline,true),'连接中断 · 末次采样休市联动暂停');
+  data.summary.market.source_status = 'ready';
+  data.runtime.status = 'running';
+  assert.equal(Q.freshness(data,0,1000,2000,false).label,'模拟运行中');
+  assert.equal(Q.marketStatus(data,{stale:false},false),'末次行情可用');
+});
+
+test('pair pause notices explain either closure and the fresh quote recovery barrier', () => {
+  const cases = [
+    ['Lighter QQQ market closed; both legs paused','Lighter QQQ 休市，双腿暂停。'],
+    ['Variational US100 market closed; both legs paused','Variational US100 休市，双腿暂停。'],
+    ['Both markets closed; both legs paused','两侧市场均休市，双腿暂停。'],
+    ['Waiting for both markets and fresh post-closure quotes','等待双侧市场开市，并取得休市后的新报价。']
+  ];
+  for (const [source_reason,expected] of cases) {
+    const data = {summary:{market:{source_status:'pair_paused',source_reason}}};
+    assert.equal(Q.pairPauseNotice(data),`休市联动暂停 · 开仓及止盈挂单已撤销，持仓保留，等待双侧开市及新报价。${expected}`);
+  }
+  assert.match(Q.pairPauseNotice({summary:{scenarios:[{pair_pause:{active:true}}]}}),/^休市联动暂停/);
+  assert.equal(Q.pairPauseNotice({summary:{market:{source_status:'ready'},scenarios:[{pair_pause:{active:false,resumed_at:1000}}]}}),'');
+  const closed = closedReference();
+  closed.summary.market.source_status = 'pair_paused';
+  assert.match(Q.referenceStatus(closed).label,/US100 休市 · 双腿暂停/);
+});
+
+test('scheduled pre-close pauses cancel orders without claiming the markets are already closed or ready to enter', () => {
+  const reason = 'Scheduled market close within 5 minutes; both legs paused';
+  const row = {...progressRow({model:'perp_dex_scalper_v3',phase:'pair_paused',cooldown_waived:true,cooldown_remaining_seconds:0,next_entry_at:null,
+    active_entries:0,active_take_profits:0,take_profit_blockers:[{slot:2,quantity:'0.01',reason:'below_min_notional'}]}),
+    pair_pause:{active:true,reason,lead_seconds:300,closing_venues:['lighter'],closed_venues:[],scheduled_close_ts:1300},hedge_status:'pair_paused'};
+  const data = progressData({runtime:{status:'paused'},summary:{ts:1000,poll_seconds:2,scenarios:[row],
+    market:{source_status:'pair_paused',source_reason:reason,quote_cache:{mode:'shared_indicative_v1',source_ts:1000,max_age_seconds:60,available:true,
+      market_state:'open',market_source_ts:1000,market_max_age_seconds:120,market_closes_at:1300}}}});
+  const p = Q.entryProgress(row,data);
+  const status = Q.scalperStatus(row);
+  const fresh = Q.freshness(data,0,1000,2000,false);
+  assert.equal(p.mode,'paused');
+  assert.equal(p.value,'休市前暂停');
+  assert.equal(p.percent,null);
+  assert.equal(p.remaining,null);
+  assert.equal(p.frozen,true);
+  assert.match(p.detail,/休市前5分钟暂停，开仓及止盈挂单已撤销，持仓保留/);
+  assert.match(p.detail,/等待下一交易时段及双侧新报价/);
+  assert.equal(status.phase,'休市前暂停');
+  assert.match(status.gate,/休市前5分钟暂停并撤单/);
+  assert.match(status.waiting,/下一交易时段/);
+  assert.equal(fresh.label,'休市前暂停');
+  assert.equal(Q.marketStatus(data,fresh,false),'已暂停 · 末次采样休市前暂停');
+  assert.match(Q.hedgeStatus(row),/^休市前暂停/);
+  assert.match(Q.pairPauseNotice(data),/^休市前暂停 · 休市前5分钟暂停/);
+  assert.match(Q.pairPauseNotice(data),/距预定休市不超过5分钟，双腿已提前暂停并撤单/);
+  assert.equal(Q.referenceStatus(data).marketState,'open');
+  assert.doesNotMatch(JSON.stringify([p,status,fresh,Q.marketStatus(data,fresh,false),Q.hedgeStatus(row),Q.pairPauseNotice(data),Q.referenceStatus(data)]),/已休市|市场关闭|QQQ 休市|US100 休市|均休市|休市期间|100%|止盈单未挂出|未覆盖|首次开仓|免等待/);
+  assert.match(Q.pairPauseNotice({summary:{scenarios:[row]}}),/^休市前暂停/);
+  assert.equal(Q.entryProgress(row,progressData()).value,'休市前暂停');
+  data.summary.market.source_reason = 'Lighter QQQ market closed; both legs paused';
+  row.pair_pause.reason = data.summary.market.source_reason;
+  row.pair_pause.closed_venues = ['lighter'];
+  assert.equal(Q.entryProgress(row,data).value,'休市联动暂停');
+  assert.match(Q.pairPauseNotice(data),/Lighter QQQ 休市，双腿暂停/);
+});
+
 test('missing or malformed cooldowns remain unknown and legacy grids have no progress', () => {
   assert.equal(Q.entryProgress({grid_step_percent:'0.05'},progressData()),null);
   for (const bad of [null,undefined,'',true,'bad',Infinity]) {
