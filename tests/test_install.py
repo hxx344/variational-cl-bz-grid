@@ -990,7 +990,8 @@ if name == "runuser":
 
     def test_help_and_bad_arguments_do_not_change_the_system(self):
         help_result = self.install("--help")
-        self.assertIn("0.5% / 1% / 2%", help_result.stdout)
+        self.assertIn("Lighter QQQ / Variational US100", help_result.stdout)
+        self.assertIn("0.05% / 0.1% / 0.2%", help_result.stdout)
         self.install("--unknown", expected=1)
         self.install("--compare", "--single", expected=1)
         self.assertFalse(self.log.exists())
