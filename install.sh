@@ -8,18 +8,17 @@ usage() {
   cat <<'HELP'
 Usage: install.sh [--compare|--inventory|--qqq-hedge|--single|--cleanup|--help]
 Debian 12+ / Ubuntu 24.04+, with systemd and Python 3.11+.
-New installs run the 0.5% / 1% / 2% paper comparison by default.
-Grid levels and paper margin budgets are unlimited, with 100x margin estimates.
-The comparison includes a localhost dashboard on port 9876, accessed over SSH.
+New installs run Lighter QQQ / Variational US100 paper scalping by default.
+Three independent take-profit settings: 0.05% / 0.1% / 0.2%.
+Includes a localhost dashboard on port 9876, accessed over SSH.
 Repeating the command upgrades code and preserves mode, settings and data.
-Earlier default experiments migrate to +/-30% with a backup and new ledgers.
-Earlier seven-day centers migrate to three days with separate preserved ledgers.
+QQQ and historical CL/BZ modes share one strategy service, never parallel services.
 Deployments use a cached offline preflight; full regression tests run in CI.
 Unchanged dependencies, validated code and running services are reused.
-  --compare  Start the three-grid comparison (also switches existing installs).
-  --inventory  Start the five-scenario inventory comparison with its own ledgers.
+  --compare  Explicitly select the historical CL/BZ three-grid comparison.
+  --inventory  Explicitly select the historical CL/BZ inventory comparison.
   --qqq-hedge  Start the three-scenario Lighter QQQ / Variational US100 paper comparison.
-  --single   Start one grid using config.json.
+  --single   Explicitly select the historical CL/BZ single grid using config.json.
   --cleanup  Reclaim obsolete deployments without downloading or restarting.
   --help     Show this help without installing anything.
 All modes reuse a saved vr-token or ask for hidden input; Lighter data stays public.
@@ -334,7 +333,7 @@ else
 fi
 python3 -c 'import sys; assert sys.version_info >= (3, 11), "Python 3.11+ required (Debian 12+ / Ubuntu 24.04+)"'
 
-mode=${requested_mode:-$(cat "$conf/mode" 2>/dev/null || echo compare)}
+mode=${requested_mode:-$(cat "$conf/mode" 2>/dev/null || echo qqq-hedge)}
 [[ $mode == run || $mode == compare || $mode == inventory || $mode == qqq-hedge ]] || { echo 'Invalid saved service mode.' >&2; exit 1; }
 experiment_name=experiments.json
 config_name=config.json
@@ -344,6 +343,12 @@ if [[ $mode == inventory ]]; then
 elif [[ $mode == qqq-hedge ]]; then
   experiment_name=qqq-hedge.json
 fi
+case "$mode" in
+  qqq-hedge) service_description='Lighter QQQ / Variational US100 paper scalper' ;;
+  inventory) service_description='Variational CL/BZ paper inventory comparison' ;;
+  compare) service_description='Variational CL/BZ paper grid comparison' ;;
+  run) service_description='Variational CL/BZ paper single grid' ;;
+esac
 
 id "$account" >/dev/null 2>&1 || useradd --system --home-dir "$state" --shell /usr/sbin/nologin "$account"
 install -d -m 755 "$app" "$app/releases" "$conf"
@@ -580,7 +585,7 @@ deployment=$(mktemp -d "$app/.deploy.XXXXXX")
 printf 'variational-grid\n' >"$deployment/.install-owned"
 cat >"$deployment/variational-grid.service" <<'UNIT'
 [Unit]
-Description=Variational CL BZ paper spread grid
+Description=Variational paper strategy
 After=network-online.target
 Wants=network-online.target
 
@@ -605,11 +610,12 @@ RestrictAddressFamilies=AF_INET AF_INET6 AF_UNIX
 [Install]
 WantedBy=multi-user.target
 UNIT
+sed -i "s|^Description=.*|Description=$service_description|" "$deployment/variational-grid.service"
 if [[ $mode != run ]]; then
   sed -i "s|^ExecStart=.*|ExecStart=/usr/bin/python3 -m variational_grid compare --experiments $conf/$experiment_name|" "$deployment/variational-grid.service"
   cat >"$deployment/variational-grid-web.service" <<UNIT
 [Unit]
-Description=Variational paper grid dashboard (localhost)
+Description=$service_description dashboard (localhost)
 After=variational-grid.service
 
 [Service]
@@ -687,6 +693,7 @@ storage prune "$old_current"
 
 echo 'Paper simulation ready. Settings and ledger are preserved on repeat installation.'
 printf 'Service mode: %s\n' "$mode"
+printf 'Strategy: %s (one strategy service)\n' "$service_description"
 printf 'Settings: %s/%s\n' "$conf" "$config_name"
 if [[ $mode != run ]]; then
   printf 'Experiments: %s/%s\n' "$conf" "$experiment_name"

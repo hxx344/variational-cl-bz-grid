@@ -219,6 +219,7 @@ if name == "runuser":
         result = self.install('--inventory')
         self.assertIn('skipping legacy grid migrations', result.stdout)
         self.assertEqual((self.conf / 'mode').read_text().strip(), 'inventory')
+        self.assertIn('Description=Variational CL/BZ paper inventory comparison', self.unit.read_text())
         self.assertIn(f'compare --experiments {self.conf}/inventory.json', self.unit.read_text())
         self.assertIn(f'dashboard --experiments {self.conf}/inventory.json --port 9876', self.web_unit.read_text())
         self.assertFalse((self.conf / 'experiments.json').exists())
@@ -245,12 +246,15 @@ if name == "runuser":
         self.assertFalse(any(c[0] == 'apt-get' or c[0] == 'git' and
                              any(arg in ('fetch', 'clone', 'archive') for arg in c[1:]) for c in self.calls()))
 
-    def test_qqq_fresh_install_preserves_saved_mode_and_reuses_unchanged_deployment(self):
-        result = self.install('--qqq-hedge')
+    def test_qqq_default_install_preserves_saved_mode_and_reuses_unchanged_deployment(self):
+        result = self.install()
         self.assertIn('skipping legacy grid migrations', result.stdout)
         self.assertIn('vr-token authenticated paper pricing', result.stdout)
         self.assertTrue(any(c[0] == 'runuser' and 'check-session' in c for c in self.calls()))
         self.assertEqual((self.conf / 'mode').read_text().strip(), 'qqq-hedge')
+        self.assertIn('Description=Lighter QQQ / Variational US100 paper scalper\n', self.unit.read_text())
+        self.assertIn('Description=Lighter QQQ / Variational US100 paper scalper dashboard (localhost)', self.web_unit.read_text())
+        self.assertNotIn('CL BZ', self.unit.read_text() + self.web_unit.read_text())
         self.assertIn(f'compare --experiments {self.conf}/qqq-hedge.json', self.unit.read_text())
         self.assertIn(f'dashboard --experiments {self.conf}/qqq-hedge.json --port 9876', self.web_unit.read_text())
         self.assertFalse((self.conf / 'experiments.json').exists())
@@ -386,7 +390,7 @@ if name == "runuser":
 
     def test_qqq_switch_preserves_old_ledgers_and_ignores_legacy_economic_migrations(self):
         from variational_grid.comparison import Experiment
-        self.install()
+        self.install('--compare')
         config_path = self.conf / 'config.json'
         config = json.loads(config_path.read_text())
         config.update(center_hours=168, max_levels=8, max_margin_fraction='0.80', paper_leverage='5',
@@ -482,7 +486,7 @@ if name == "runuser":
         self.assertEqual(path.read_bytes(), preserved)
 
     def test_invalid_preserved_qqq_does_not_switch_existing_services(self):
-        self.install()
+        self.install('--compare')
         path = self.conf / 'qqq-hedge.json'
         path.write_text(json.dumps({'kind': 'unexpected'}))
         original = path.read_bytes()
@@ -517,7 +521,7 @@ if name == "runuser":
                 self.assertEqual(self.restarts(), [])
 
     def test_inventory_switch_preserves_legacy_configuration_and_all_mode_ledgers(self):
-        self.install()
+        self.install('--compare')
         config_path = self.conf / 'config.json'
         config = json.loads(config_path.read_text())
         config.update(center_hours=168, max_levels=8, max_margin_fraction='0.80', paper_leverage='5',
@@ -561,7 +565,7 @@ if name == "runuser":
 
     def test_inventory_real_manifest_survives_legacy_single_migration(self):
         from variational_grid.inventory_comparison import InventoryCohort, InventoryExperiment
-        self.install()
+        self.install('--compare')
         path = self.conf / 'config.json'
         config = json.loads(path.read_text())
         config.update(paper_leverage='5', center_hours=168, max_levels=8,
@@ -625,7 +629,7 @@ if name == "runuser":
         self.assertEqual(config_path.read_bytes(), preserved)
 
     def test_invalid_preserved_inventory_does_not_switch_existing_services(self):
-        self.install()
+        self.install('--compare')
         path = self.conf / 'inventory.json'
         path.write_text(json.dumps({'kind': 'unexpected'}))
         original = path.read_bytes()
@@ -688,7 +692,7 @@ if name == "runuser":
         self.assertEqual(self.restarts(), [])
 
     def test_runtime_and_configuration_changes_restart_affected_services(self):
-        self.install()
+        self.install('--compare')
         with (self.source / 'variational_grid/engine.py').open('a') as file:
             file.write('\n# Runtime revision\n')
         self.commit()
@@ -727,8 +731,9 @@ if name == "runuser":
         self.assertEqual(self.restarts(), ['variational-grid-web.service'])
 
     def test_fresh_install_and_upgrade_preserve_configuration_data_and_mode(self):
-        self.install()
+        self.install('--compare')
         self.assertEqual((self.conf / "mode").read_text().strip(), "compare")
+        self.assertIn('Description=Variational CL/BZ paper grid comparison', self.unit.read_text())
         self.assertIn("compare --experiments", self.unit.read_text())
         self.assertIn("dashboard --experiments", self.web_unit.read_text())
         self.assertIn("--port 9876", self.web_unit.read_text())
@@ -768,6 +773,7 @@ if name == "runuser":
         self.assertIn(["systemctl", "disable", "--now", "variational-grid-web.service"], calls)
         self.install()
         self.assertEqual((self.conf / "mode").read_text().strip(), "run")
+        self.assertIn('Description=Variational CL/BZ paper single grid', self.unit.read_text())
         self.assertIn(" run --config ", self.unit.read_text())
         self.install("--compare")
         self.assertIn(" compare --experiments ", self.unit.read_text())
@@ -790,7 +796,7 @@ if name == "runuser":
         self.assertFalse(any(call[0] == "systemctl" and call[1] != "show" for call in calls))
 
     def test_legacy_comparison_upgrade_archives_settings_and_keeps_old_ledgers(self):
-        self.install()
+        self.install('--compare')
         path = self.conf / 'experiments.json'
         spec = json.loads(path.read_text())
         old_output = self.state / 'comparison-015-020-025'
@@ -815,7 +821,7 @@ if name == "runuser":
         self.assertEqual(self.restarts(), [])
 
     def test_seven_day_install_migrates_both_modes_once_without_touching_old_data(self):
-        self.install()
+        self.install('--compare')
         config_path = self.conf / 'config.json'
         config = json.loads(config_path.read_text())
         config.pop('center_hours')
@@ -847,7 +853,7 @@ if name == "runuser":
         self.assertEqual((self.conf / 'config.before-center3d.json').read_bytes(), original_config)
 
     def test_single_first_upgrade_keeps_old_comparison_window_identity(self):
-        self.install()
+        self.install('--compare')
         config_path = self.conf / 'config.json'
         config = json.loads(config_path.read_text())
         config.pop('center_hours')
@@ -916,7 +922,7 @@ if name == "runuser":
         self.check_margin_upgrade_order('--compare', '--single')
 
     def test_previous_percentage_install_migrates_to_full_range(self):
-        self.install()
+        self.install('--compare')
         path = self.conf / 'experiments.json'
         spec = json.loads(path.read_text())
         spec['output_dir'] = str(self.state / 'comparison-pct-05-1-2')

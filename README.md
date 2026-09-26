@@ -1,6 +1,6 @@
-# Variational Grid · 跨品种网格与对冲模拟
+# Variational Grid · QQQ / US100 对冲剥头皮模拟
 
-提供 CL/BZ 价差网格、CL/BZ 库存组合，以及 **Lighter QQQ 只做多挂单剥头皮 + Variational US100 对冲**三种独立纸面策略。QQQ 模式取消新开仓距离门槛，对照三种止盈比例，共三组，统一净敞口阈值 3000 USDC，单组最多 30 个批次、每批 1000 USDC；部署和统计口径见文末。
+当前默认部署 **Lighter QQQ 只做多挂单剥头皮 + Variational US100 对冲**。对照三种止盈比例，共三组，统一净敞口阈值 3000 USDC，单组最多 30 个批次、每批 1000 USDC，不设新开仓距离门槛；部署和统计口径见文末。CL/BZ 价差网格和库存组合仅保留历史兼容入口，与 QQQ 共用同一个模拟服务，不会随 QQQ 同时启动。
 
 CL/BZ 模式从 Variational Omni 的前端接口读取真实行情，在本地模拟 CL、BZ 等桶数双腿市价成交。以 **BZ − CL 的最近 3 日平均价差**为中枢。无需钱包私钥；该模式使用已经登录的 `vr-token` Cookie 请求与每腿桶数相匹配的指示性买卖报价。
 
@@ -22,7 +22,7 @@ US100 休市时暂停新开仓和 Var 调仓，等待开市及有效报价；休
 curl -fsSL https://raw.githubusercontent.com/hxx344/project-aggregation/main/install-all.sh | sudo bash -s -- --only variational,hub
 ```
 
-工作台自动添加 `Variational Grid`，通过服务器 `127.0.0.1:9876` 显示原始页面；只需转发工作台 `3100`。项目管理无需填写用户名、密码或行情 token；原模块保持只监听本机，通过工作台访问时由工作台登录和页面授权保护。首次安装默认 CL/BZ 三组对照，已有策略模式保留；首次/令牌失效时在 SSH 终端按提示隐藏输入 `vr-token`。
+工作台自动添加 `Variational Grid`，通过服务器 `127.0.0.1:9876` 显示原始页面；只需转发工作台 `3100`。项目管理无需填写用户名、密码或行情 token；原模块保持只监听本机，通过工作台访问时由工作台登录和页面授权保护。首次安装默认 QQQ / US100 三组止盈对照，已有策略模式保留；首次/令牌失效时在 SSH 终端按提示隐藏输入 `vr-token`。
 
 新增只读 `GET /api/hub/summary?schemaVersion=2`（无参数也返回 v2）：仅取最新发布采样和进程状态，不调用行情、不读取 token、不扫描历史或各组仓位。各组本轮累计模拟盈亏分别显示，单位 USDC，不计入工作台真实资产；暂停、停止、过期、重置及合成行情均保留相应状态。QQQ 摘要时间同时受已有 US100 仓位估值时间限制。三种监控页在工作台中隐藏时暂停前台刷新，重新进入立即补查，后台模拟继续运行。
 
@@ -180,10 +180,10 @@ python -m http.server 0 --bind 127.0.0.1 --directory data/comparison-pct-05-1-2-
 适用于 Debian 12+ / Ubuntu 24.04+、systemd：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/hxx344/variational-grid/main/install.sh | sudo bash -s -- --compare
+curl -fsSL https://raw.githubusercontent.com/hxx344/variational-grid/main/install.sh | sudo bash -s -- --qqq-hedge
 ```
 
-这一条命令会自动安装 Python 与 Git、下载并验证代码、创建独立服务账户、配置开机启动和失败后自动重启，并启动 **0.5% / 1% / 2% 三组对照模拟**。首次安装只需按提示粘贴 `vr-token`（隐藏输入），不需要钱包私钥。重复执行同一命令升级，保留配置、会话与账本。部署前后自动回收旧代码，通常只保留当前版本和一份可回退版本；网页或引擎仍在运行的更早版本会额外保留，等相关服务正常升级后再回收。新版本预检失败时不会切换正在运行的代码，未启用的失败候选与本轮临时目录自动清理。
+这一条命令会自动安装 Python 与 Git、下载并验证代码、创建独立服务账户、配置开机启动和失败后自动重启，并启动 **QQQ / US100 的 0.05% / 0.1% / 0.2% 三组止盈对照模拟**。首次安装只需按提示粘贴 `vr-token`（隐藏输入），不需要钱包私钥。重复执行同一命令升级，保留配置、会话与账本。部署前后自动回收旧代码，通常只保留当前版本和一份可回退版本；网页或引擎仍在运行的更早版本会额外保留，等相关服务正常升级后再回收。新版本预检失败时不会切换正在运行的代码，未启用的失败候选与本轮临时目录自动清理。
 
 重复部署会按变化处理，输出会说明跳过的步骤：
 
@@ -208,10 +208,12 @@ curl -fsSL https://raw.githubusercontent.com/hxx344/variational-grid/main/instal
 已经下载仓库时，也可直接运行：
 
 ```bash
-sudo bash install.sh --compare
+sudo bash install.sh --qqq-hedge
 ```
 
-首次安装不带参数也默认运行三组；已有安装不带参数会保留所选模式，`--compare` 明确切换为三组。实验配置放在 `/etc/variational-grid/experiments.json`，新实验结果放在 `/var/lib/variational-grid/comparison-pct-05-1-2-center3d-unbounded-grid-100x/`。升级检测到原来的 `step-0.15 / step-0.20 / step-0.25` 绝对间距配置时，自动备份为 `experiments.absolute-015-020-025.json`，直接升级为每侧 30% 的百分比配置并使用独立新账本；上一版 `step-0.5pct / step-1pct / step-2pct` 也会迁移到 60/30/15 层，原配置备份为 `experiments.before-range30.json`。旧目录和账本原样保留，资金、数量、成本与回撤规则保留；本版最终迁移为三日中枢、格数及金额不限、100 倍杠杆（见下文）。网格范围迁移仅识别上述旧默认组，已迁移后的自定义层数和金额限制不会被重复安装覆盖；用 `--single` 切回原单组模式，各自账本保留，同时停用三组网页服务。
+首次安装不带参数默认运行 QQQ / US100；已有安装不带参数保留所选模式，`--qqq-hedge` 明确切换到 QQQ。QQQ 配置为 `/etc/variational-grid/qqq-hedge.json`。`variational-grid.service` 是唯一模拟服务，`variational-grid-web.service` 只负责网页，描述会随模式更新；旧版写死的 CL BZ 描述不代表另一套策略正在运行。
+
+历史 CL/BZ 兼容：只有显式选择 `--compare` 或保留的旧模式才运行以下三组网格。实验配置放在 `/etc/variational-grid/experiments.json`，新实验结果放在 `/var/lib/variational-grid/comparison-pct-05-1-2-center3d-unbounded-grid-100x/`。升级检测到原来的 `step-0.15 / step-0.20 / step-0.25` 绝对间距配置时，自动备份为 `experiments.absolute-015-020-025.json`，直接升级为每侧 30% 的百分比配置并使用独立新账本；上一版 `step-0.5pct / step-1pct / step-2pct` 也会迁移到 60/30/15 层，原配置备份为 `experiments.before-range30.json`。旧目录和账本原样保留，资金、数量、成本与回撤规则保留；本版最终迁移为三日中枢、格数及金额不限、100 倍杠杆（见下文）。网格范围迁移仅识别上述旧默认组，已迁移后的自定义层数和金额限制不会被重复安装覆盖；用 `--single` 切回原单组模式，各自账本保留，同时停用三组网页服务。
 
 比较模式自动安装并启动 `variational-grid-web.service`，只监听服务器 `127.0.0.1:9876`。在**自己的电脑**打开 PowerShell 或终端，替换服务器登录名和 IP 后执行：
 
