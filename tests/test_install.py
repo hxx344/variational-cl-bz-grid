@@ -878,7 +878,7 @@ if name == "runuser":
         self.assertEqual(self.restarts(), [])
 
     def check_margin_upgrade_order(self, first, second):
-        self.install()
+        self.install('--compare')
         config_path = self.conf / 'config.json'
         config = json.loads(config_path.read_text())
         old_state = self.state / 'paper.sqlite3'
@@ -939,7 +939,7 @@ if name == "runuser":
         self.assertEqual(self.restarts(), [])
 
     def check_unbounded_upgrade_order(self, first, second):
-        self.install()
+        self.install('--compare')
         config_path = self.conf / 'config.json'
         config = json.loads(config_path.read_text())
         old_state = self.state / 'paper-unlimited-margin.sqlite3'
