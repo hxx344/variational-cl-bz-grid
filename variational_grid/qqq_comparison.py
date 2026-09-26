@@ -8,6 +8,7 @@ import math
 import os
 from pathlib import Path
 import re
+import sqlite3
 import time
 import zlib
 from types import SimpleNamespace
@@ -472,7 +473,7 @@ def run_qqq(args, experiment):
     return 0
 
 
-def read_qqq_dashboard(experiment, window):
+def read_qqq_dashboard(experiment, window, *, include_history=True, include_details=True, history_deadline=None, through_ts=None):
     from .dashboard import read_db, WINDOWS
     from .reset import read_state
     result = {"kind": "qqq_hedge", "server_ts": time.time(), "runtime": {"status": "starting"}, "summary": None,
@@ -500,30 +501,72 @@ def read_qqq_dashboard(experiment, window):
         if raw:
             runtime = json.loads(raw[0])
             result["runtime"] = {k: runtime.get(k) for k in ("status", "reason", "updated_utc")}
-        raw = db.execute("SELECT payload FROM summaries ORDER BY ts DESC LIMIT 1").fetchone()
+        raw = db.execute("SELECT payload FROM summaries" + (" WHERE ts<=?" if through_ts is not None else "")
+                         + " ORDER BY ts DESC LIMIT 1", (through_ts,) if through_ts is not None else ()).fetchone()
         if not raw:
             return result
         summary = result["summary"] = decode_summary(raw[0])
         names = [r["name"] for r in summary["scenarios"]]
         # Ledgers retain only the last two account snapshots. Capture this
         # published point before a long history scan lets the writer prune it.
-        for name, config in experiment.scenarios.items():
+        details = include_details
+        for name, config in experiment.scenarios.items() if include_details else ():
             with closing(read_db(config.state_file)) as ledger:
                 ledger.execute("BEGIN")
                 raw = ledger.execute("SELECT account FROM ticks WHERE ts=?", (summary["ts"],)).fetchone()
                 if not raw:
-                    raise GridError("QQQ dashboard missing published account snapshot")
+                    # A concurrent writer can prune this checkpoint. Never mix
+                    # newer account state with the already published summary.
+                    details = False
+                    break
                 account = json.loads(raw[0])
                 result["positions"].extend({"scenario": name, **slot} for slot in account["slots"] if dec(slot["qty"]) > 0)
                 for raw, in ledger.execute("SELECT payload FROM fills WHERE frame_ts<=? ORDER BY id DESC LIMIT 100", (summary["ts"],)):
                     result["trades"].append({"scenario": name, **json.loads(raw)})
-        from .qqq_history import read_history
-        result["history"] = {"range": window, **read_history(
-            db, summary["ts"] - WINDOWS[window], summary["ts"], names,
-            experiment.settings.poll_seconds, summary["scenarios"][0].get("hedge_threshold_usdc") is not None)}
+        if include_history:
+            from .qqq_history import read_history
+            result["history"] = {"range": window, **read_history(
+                db, summary["ts"] - WINDOWS[window], summary["ts"], names,
+                experiment.settings.poll_seconds, summary["scenarios"][0].get("hedge_threshold_usdc") is not None,
+                deadline=history_deadline)}
+    if not details:
+        result["positions"], result["trades"] = [], []
     result["trades"].sort(key=lambda r: (r["ts"], r["id"]), reverse=True)
-    result["details_available"] = True
+    result["details_available"] = details
     return result
+
+
+def read_qqq_snapshot(experiment):
+    """Fast published state, independent of the exclusive history/reset lock.
+
+    Each database uses a read transaction; reset-state readback prevents a
+    response from combining data across archive/clear/generation transitions.
+    All early returns and read failures pass through the same epoch check.
+    """
+    from .reset import read_state
+    for _ in range(2):
+        before = read_state(experiment)
+        try:
+            result = read_qqq_dashboard(experiment, "24h", include_history=False)
+        except (OSError, sqlite3.Error, GridError, ValueError, KeyError, TypeError):
+            if before != read_state(experiment):
+                continue
+            raise
+        after = read_state(experiment)
+        if before == result["reset"] == after:
+            return result
+    raise GridError("QQQ snapshot changed during reset; retry")
+
+
+def read_qqq_history(experiment, window, through_ts=None):
+    from .reset import control_lock
+    # Retain reset exclusion for the long read; current snapshots do not wait
+    # for this lock. Bound abandoned requests rather than scanning indefinitely.
+    with control_lock(experiment):
+        result = read_qqq_dashboard(experiment, window, include_details=False,
+                                    history_deadline=time.monotonic() + 25, through_ts=through_ts)
+    return {"reset": result["reset"], "summary_ts": (result["summary"] or {}).get("ts"),
+            "history": result["history"]}
 
 
 def demo_qqq(args):

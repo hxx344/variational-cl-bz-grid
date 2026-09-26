@@ -2,7 +2,14 @@
 import base64
 import json
 import sqlite3
+import time
 import zlib
+
+from .models import GridError
+
+
+class HistoryTimeout(GridError):
+    pass
 
 
 def history_rows(db, start, end):
@@ -40,7 +47,7 @@ def history_rows(db, start, end):
         yield ts, data
 
 
-def read_history(db, start, end, names, poll_seconds, dollar_hedge, limit=900):
+def read_history(db, start, end, names, poll_seconds, dollar_hedge, limit=900, *, deadline=None):
     """Preserve bucket endpoints/extrema without retaining the full window.
 
     COUNT and iteration must share the read transaction already used for the
@@ -59,6 +66,8 @@ def read_history(db, start, end, names, poll_seconds, dollar_hedge, limit=900):
     extrema = [[[None, None, None, None] for _ in names] for _ in keys]
     lo, hi = 0, count // buckets if buckets else count
     for index, (ts, history) in enumerate(history_rows(db, start, end)):
+        if deadline is not None and index % 64 == 0 and time.monotonic() >= deadline:
+            raise HistoryTimeout("QQQ history read exceeded its time budget")
         if previous is not None and (ts - previous > gap_seconds or history["gap"]):
             segment += 1
         point = {"ts": ts, "segment": segment}

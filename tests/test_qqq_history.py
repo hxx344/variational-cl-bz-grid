@@ -310,7 +310,7 @@ class HistoryTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             experiment = self.detail_fixture(Path(directory))
             original = read_history
-            def advance_while_reading(db, *args):
+            def advance_while_reading(db, *args, **kwargs):
                 self.assertTrue(db.in_transaction)
                 for config in experiment.scenarios.values():
                     with closing(sqlite3.connect(config.state_file)) as writer, writer:
@@ -319,7 +319,7 @@ class HistoryTests(unittest.TestCase):
                         writer.execute("DELETE FROM ticks WHERE ts<104")
                         writer.execute("INSERT INTO fills VALUES (3,106,?)", (json.dumps({"id": 3, "ts": 106, "qty": "200"}),))
                         self.assertIsNone(writer.execute("SELECT account FROM ticks WHERE ts=100").fetchone())
-                return original(db, *args)
+                return original(db, *args, **kwargs)
             with patch("variational_grid.qqq_history.read_history", side_effect=advance_while_reading) as history:
                 result = read_dashboard(experiment, "1h")
             history.assert_called_once()
@@ -331,15 +331,17 @@ class HistoryTests(unittest.TestCase):
             self.assertTrue(all(t["id"] == 1 and t["ts"] == 100 for t in result["trades"]))
             self.assertEqual(result["history"]["points"][-1]["ts"], 100)
 
-    def test_initial_missing_published_snapshot_is_rejected_before_history(self):
+    def test_missing_published_snapshot_keeps_summary_without_future_or_partial_details(self):
         with tempfile.TemporaryDirectory() as directory:
             experiment = self.detail_fixture(Path(directory))
-            with closing(sqlite3.connect(experiment.scenarios["a"].state_file)) as db, db:
+            with closing(sqlite3.connect(experiment.scenarios["b"].state_file)) as db, db:
                 db.execute("DELETE FROM ticks WHERE ts=100")
-            with patch("variational_grid.qqq_history.read_history") as history:
-                with self.assertRaisesRegex(GridError, "missing published account snapshot"):
-                    read_dashboard(experiment, "1h")
-            history.assert_not_called()
+            result = read_dashboard(experiment, "1h")
+            self.assertEqual(result["summary"]["ts"], 100)
+            self.assertFalse(result["details_available"])
+            self.assertEqual(result["positions"], [])
+            self.assertEqual(result["trades"], [])
+            self.assertEqual(result["history"]["source_count"], 1)
 
     def test_corrupt_compressed_latest_or_historical_state_returns_clean_503(self):
         bad = json.dumps({"qqq_compact": 1, "history": sample(1, 2),

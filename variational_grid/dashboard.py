@@ -3,6 +3,7 @@ from contextlib import closing
 import base64
 import hashlib
 import json
+import math
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 import sqlite3
@@ -288,6 +289,28 @@ def make_server(experiment, port=9876):
                         data["var_session"] = session_control.status()
                     payload = json.dumps(data, ensure_ascii=False).encode()
                     return self.reply(200, payload, "application/json; charset=utf-8", head)
+                if parsed.path in {"/api/qqq-snapshot", "/api/qqq-history"} and getattr(experiment, "kind", None) == "qqq_hedge":
+                    from .qqq_comparison import read_qqq_snapshot, read_qqq_history
+                    query = parse_qs(parsed.query)
+                    if parsed.path == "/api/qqq-snapshot":
+                        if parsed.query:
+                            return self.reply(400, b"Unexpected snapshot query", head=head)
+                        data = read_qqq_snapshot(experiment)
+                        data["reset_token"] = reset_token
+                        if session_control.path:
+                            data["var_session"] = session_control.status()
+                    else:
+                        window = query.get("range", ["24h"])[0]
+                        if window not in WINDOWS or set(query) - {"range", "through"}:
+                            return self.reply(400, b"Invalid history window", head=head)
+                        try:
+                            through = float(query["through"][0]) if "through" in query else None
+                            if through is not None and (not math.isfinite(through) or through <= 0):
+                                raise ValueError()
+                        except ValueError:
+                            return self.reply(400, b"Invalid history timestamp", head=head)
+                        data = read_qqq_history(experiment, window, through)
+                    return self.reply(200, json.dumps(data, ensure_ascii=False).encode(), "application/json; charset=utf-8", head)
                 if parsed.path == "/api/var-session" and not parsed.query:
                     data = {**session_control.status(), "csrf_token": session_token}
                     return self.reply(200, json.dumps(data).encode(), "application/json", head)
@@ -296,7 +319,13 @@ def make_server(experiment, port=9876):
                     page = (experiment.output / "public/index.html").read_bytes().replace(b"\r\n", b"\n").replace(b"\r", b"\n")
                     return self.reply(200, page, "text/html; charset=utf-8", head, report=True)
                 return self.reply(404, b"Not found", head=head)
-            except (OSError, sqlite3.Error, GridError, ValueError, KeyError, TypeError):
+            except (OSError, sqlite3.Error, GridError, ValueError, KeyError, TypeError) as error:
+                if parsed.path in {"/api/qqq-snapshot", "/api/qqq-history"}:
+                    from .qqq_history import HistoryTimeout
+                    code = "history_timeout" if isinstance(error, HistoryTimeout) else "history_unavailable" if parsed.path == "/api/qqq-history" else "snapshot_unavailable"
+                    # Do not log exception values: malformed stored data may be private.
+                    print(f"QQQ dashboard: {code} ({type(error).__name__})", flush=True)
+                    return self.reply(503, json.dumps({"error": code}).encode(), "application/json", head)
                 return self.reply(503, b'{"error":"Dashboard data temporarily unavailable"}', "application/json", head)
 
         def do_POST(self):

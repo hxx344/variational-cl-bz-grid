@@ -169,6 +169,7 @@
   const $ = id => document.getElementById(id), E = M.escape;
   let data = null, state = M.state(location.search, []), page = 0, selectedTs = null;
   let timer = null, controller = null, disconnected = false, received = 0, serverAge = 0;
+  let historyTimer = null, historyController = null, historyDue = 0, historyError = '', connectionError = '';
   let progressReceived = 0;
   let resetSending = false, resetError = '', resetGeneration = null;
   const allRows = () => data?.summary?.scenarios || [];
@@ -180,6 +181,7 @@
   const pnl = value => `<span class="${M.tone(value)}">${M.signed(value, 2)}</span>`;
   const sourceReason = value => ({'Synthetic demonstration; not a historical backtest':'合成行情演示，用于查看模拟行为，不是历史回测。','US100 market closed; maker entries paused':'US100 市场关闭，暂停新开仓。','US100 quote stale; maker entries paused':'US100 报价过期，暂停新开仓。','US100 quote expired while gathering hedge prices':'收集对冲报价期间 US100 报价过期，等待有效行情。'}[value] || value || '等待数据恢复');
   function setState(change, push = true) {
+    if (change.range && change.range !== state.range) historyDue = 0;
     state = {...state, ...change}; page = 0;
     const query = new URLSearchParams();
     if (state.strategy !== 'all') query.set('strategy', state.strategy);
@@ -207,7 +209,7 @@
     let notice = '';
     const elapsed = (Date.now() - received) / 1000, cooldown = cooldownNotice(data, elapsed), reference = referenceStatus(data, elapsed);
     if (reference) $('us100-source-time').textContent = `${M.date(s?.market?.var_source_ts ?? s?.market?.quote_cache?.source_ts)} · ${reference.label}`;
-    if (disconnected) notice = '无法连接监控服务，保留上次成功读取的数据。页面会自动重试。';
+    if (disconnected) notice = connectionError + '保留上次成功读取的数据。页面会自动重试。';
     else if (runtime === 'stopped') notice = '模拟进程已停止，以下为最后保存的数据。';
     else if (runtime === 'paused') notice = '行情暂停，保留最近有效采样：' + sourceReason(data.runtime.reason);
     else if (f.stale) notice = '行情已过期，收益和仓位估值停留在最后有效采样。';
@@ -268,7 +270,7 @@
   }
   function drawChart(id, field) {
     const host = $(id), points = data?.history?.points || [], isExposure = field !== 'pnl', isDollar = field === 'net_exposure';
-    if (!points.length) {host.innerHTML = '<div class="empty">等待有效历史采样</div>'; return;}
+    if (!points.length) {host.innerHTML = `<div class="empty">${E(historyError || (historyController ? '历史曲线正在加载，当前账户可继续刷新' : '等待有效历史采样'))}</div>`; return;}
     const selected = rows(), width = Math.max(250, host.clientWidth), height = host.clientHeight || 280;
     const left = isExposure ? 52 : 62, right = width - 15, top = 22, bottom = height - 31;
     const threshold = isExposure && isDollar ? Number(selected[0]?.hedge_threshold_usdc) : isExposure && state.strategy !== 'all' && M.finite(selected[0]?.hedge_tolerance_percent) ? Number(selected[0].hedge_tolerance_percent) : null;
@@ -320,7 +322,8 @@
     $('sample-time').textContent = sample ? M.date(sample.ts) : '—';
     $('sample-values').innerHTML = sample ? rows().map(r => `<span class="${cls(r)}">${E(label(r))}：${M.signed(historyValue(data.history, sample, r.name, 'pnl'), 2)} USDC · 敞口 ${dollars ? M.signed(historyValue(data.history, sample, r.name, exposureField),2) + ' USDC' : percent(historyValue(data.history, sample, r.name, exposureField))}</span>`).join('') : '';
     const ranges = {'1h':'1 小时','24h':'24 小时','7d':'7 天'}, shownRange = data?.history?.range || state.range;
-    $('history-note').textContent = points.length ? `窗口 ${ranges[shownRange] || shownRange} · 原始 ${M.number(data.history.source_count, 0)} 点 / 显示 ${points.length} 点 · 行情缺口断线显示 · 用滑块、方向键或轻触查看采样。${shownRange !== state.range ? '所选窗口正在加载，保留上次成功窗口。' : ''}` : '曲线范围只影响历史展示，不重置累计收益或成交统计。';
+    $('history-note').textContent = points.length ? `窗口 ${ranges[shownRange] || shownRange} · 原始 ${M.number(data.history.source_count, 0)} 点 / 显示 ${points.length} 点 · 曲线截至 ${M.date(points.at(-1).ts)}，每分钟刷新 · 行情缺口断线显示 · 用滑块、方向键或轻触查看采样。${shownRange !== state.range ? '所选窗口正在加载，保留上次成功窗口。' : ''}` : '曲线范围只影响历史展示，不重置累计收益或成交统计。';
+    $('history-note').textContent += historyError ? ` ${historyError}${points.length ? '保留上次成功曲线，截至 ' + M.date(points.at(-1).ts) + '。' : ''}` : historyController ? ' 历史曲线正在加载。' : '';
   }
   function table(headers, body, records = true) {
     return `<div class="table-wrap" tabindex="0" aria-label="${E(headers.join('、'))}"><table${records ? ' class="records-table"' : ''}><thead><tr>${headers.map(h => `<th scope="col">${E(h)}</th>`).join('')}</tr></thead><tbody>${body}</tbody></table></div>`;
@@ -389,28 +392,67 @@
     $('page-label').textContent = `第 ${page + 1} / ${Math.ceil(values.length / size)} 页 · 已加载 ${values.length} 条`;
   }
   function render() {renderOverview(); renderCharts(); renderLedgers(); renderDetails(); status();}
+  function loadError(error, historical = false) {
+    if (error.status === 401 || error.status === 403) return '页面访问授权失效，请从工作台重新打开此项目。';
+    if (error.name === 'AbortError' || error.code === 'history_timeout') return historical ? '历史曲线读取超时，稍后重试；当前账户不受影响。' : '当前账户读取超时，页面将自动重试。';
+    if (error.status) return `${historical ? '历史曲线' : '监控接口'}暂不可用（HTTP ${error.status}），稍后重试。`;
+    return historical ? '历史曲线暂不可用，稍后重试；当前账户不受影响。' : '暂时无法读取监控数据，页面将自动重试。';
+  }
+  async function readJSON(url, signal) {
+    const response = await fetch(url, {signal,cache:'no-store'});
+    if (!response.ok) {
+      const error = new Error('HTTP ' + response.status); error.status = response.status;
+      try {error.code = (await response.json()).error;} catch (_) {}
+      throw error;
+    }
+    return response.json();
+  }
+  async function refreshHistory() {
+    if (!data?.summary || !window.GridHub.active() || historyController || Date.now() < historyDue) return;
+    clearTimeout(historyTimer);
+    const range = state.range, generation = data.reset?.generation, through = data.summary.ts;
+    const request = historyController = new AbortController(), timeout = setTimeout(() => request.abort(), 30000);
+    let succeeded = false;
+    historyError = ''; renderCharts();
+    try {
+      const next = await readJSON('/api/qqq-history?range=' + encodeURIComponent(range) + '&through=' + encodeURIComponent(through), request.signal);
+      if (!window.GridHub.active() || !data?.summary || range !== state.range || generation !== data?.reset?.generation) return;
+      if (next.reset?.generation !== generation || next.history?.range !== range || !Array.isArray(next.history?.points)
+          || !Array.isArray(next.history?.names) || next.history.names.length !== names().length
+          || !names().every(name => next.history.names.includes(name)) || !(next.summary_ts <= through)) throw new Error('Unexpected history payload');
+      data.history = next.history; succeeded = true;
+    } catch (error) {
+      if (window.GridHub.active() && range === state.range && generation === data?.reset?.generation) historyError = loadError(error, true);
+    } finally {
+      clearTimeout(timeout); historyController = null;
+      const changed = range !== state.range || generation !== data?.reset?.generation;
+      historyDue = changed ? 0 : Date.now() + (succeeded ? 60000 : 10000);
+      if (window.GridHub.active()) {renderCharts(); historyTimer = setTimeout(refreshHistory, Math.max(0, historyDue - Date.now()));}
+    }
+  }
   async function refresh() {
     clearTimeout(timer); controller?.abort();
     if (!window.GridHub.active()) return;
     const request = controller = new AbortController(), timeout = setTimeout(() => request.abort(), 8000);
     $('refresh').disabled = true;
     try {
-      const response = await fetch('/api/dashboard?range=' + encodeURIComponent(state.range), {signal:request.signal,cache:'no-store'});
-      if (!response.ok) throw new Error('HTTP ' + response.status);
-      const next = await response.json();
+      const next = await readJSON('/api/qqq-snapshot', request.signal);
       if (request !== controller || !window.GridHub.active()) return;
       if (next.summary && (next.summary.kind !== 'qqq_hedge' || !Array.isArray(next.summary.scenarios))) throw new Error('Unexpected dashboard payload');
-      if (data?.reset?.generation !== next.reset?.generation) {selectedTs = null; page = 0;}
+      if (data?.reset?.generation !== next.reset?.generation || !next.summary) {selectedTs = null; page = 0; historyDue = 0; historyError = '';}
+      else if (data?.history) next.history = data.history;
       data = next; received = Date.now(); progressReceived = performance.now();
       serverAge = data.summary ? Math.max(0, (M.finite(data.server_ts) ? Number(data.server_ts) : received / 1000) - Number(data.summary.ts)) : 0;
-      disconnected = false;
+      disconnected = false; connectionError = '';
       if (data.summary) state = M.state(location.search, names());
       render();
+      refreshHistory();
     } catch (error) {
       if (request !== controller || !window.GridHub.active()) return;
       disconnected = true;
+      connectionError = loadError(error);
       if (data) status();
-      else {$('notice').hidden = false; $('notice').textContent = '暂时无法读取监控数据，页面将自动重试。'; $('status').textContent = '连接中断'; $('status').className = 'status error';}
+      else {$('notice').hidden = false; $('notice').textContent = connectionError; $('status').textContent = '连接中断'; $('status').className = 'status error';}
     } finally {
       clearTimeout(timeout);
       if (request === controller) {$('refresh').disabled = false; if (window.GridHub.active()) timer = setTimeout(refresh, 10000);}
@@ -429,7 +471,7 @@
     } catch {resetError = '重置请求结果尚未确认，请刷新查看状态；不会自动重复提交。';}
     finally {clearTimeout(timeout); resetSending = false; resetStatus(); refresh();}
   };
-  $('refresh').onclick = refresh;
+  $('refresh').onclick = () => {historyDue = 0; refresh();};
   $('all-strategies').onclick = () => setState({strategy:'all'});
   $('strategy-select').onchange = event => setState({strategy:event.target.value});
   $('sample').oninput = event => {selectedTs = data?.history?.points[Number(event.target.value)]?.ts ?? null; renderCharts();};
@@ -452,10 +494,10 @@
     const url = URL.createObjectURL(new Blob([M.csv(values)], {type:'text/csv;charset=utf-8'}));
     const link = document.createElement('a'); link.href = url; link.download = `qqq-hedge-trades-${state.strategy}-${Date.now()}.csv`; link.click(); setTimeout(() => URL.revokeObjectURL(url), 1000);
   };
-  window.addEventListener('popstate', () => {state = M.state(location.search,names()); page = 0; selectedTs = null; render(); refresh();});
+  window.addEventListener('popstate', () => {state = M.state(location.search,names()); page = 0; selectedTs = null; historyDue = 0; render(); refresh();});
   let resize;
   new ResizeObserver(() => {clearTimeout(resize); resize = setTimeout(renderCharts,80);}).observe($('pnl-chart'));
-  window.GridHub.subscribe(active => {if (active) refresh(); else {clearTimeout(timer); controller?.abort();}});
+  window.GridHub.subscribe(active => {if (active) {historyDue = 0; refresh();} else {clearTimeout(timer); clearTimeout(historyTimer); controller?.abort(); historyController?.abort();}});
   setInterval(() => {if (window.GridHub.active()) status();}, 1000);
   render(); refresh();
 })(typeof window !== 'undefined' ? window : globalThis);
